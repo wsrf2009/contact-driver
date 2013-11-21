@@ -1,12 +1,8 @@
-/*
-* Name: UART head file
-* Date: 2012/10/08
-* Author: Alex Wang
-* Version: 1.0
-*/
 
-#ifndef UART_H
-#define UART_H
+
+#include <asm/io.h>
+
+
 
 #define BaseAddr_UART1 0x4806A000
 #define BaseAddr_UART2 0x4806C000
@@ -34,21 +30,7 @@
 #define b_RX_FIFO_STS     7          // 1, at least one parity error, framing error or break occcur in RX FIFO; 0, normal operation
 
 
-
-
-
-#define SC_OVERRUN_ERROR    0xFA
-#define SC_BREAK_ERROR      0XFB
-#define SC_FRAME_ERROR      0xFC
-#define SC_PARITY_ERROR     0xFD
-#define SC_TIMEOUT_ERROR    0xFE
-#define OK                  0
-
-
-
-
-
-typedef struct
+struct uart_reg_array
 {
     union 
     {   // OFFSET:0X000
@@ -71,7 +53,7 @@ typedef struct
     }Reg3;
 
     // OFFSET:0X00C
-    volatile unsigned int LCR;  // Line control register
+    volatile unsigned int LCR;	// Line control register
 
     union
     {   // OFFSET:0X010
@@ -170,21 +152,243 @@ typedef struct
     volatile unsigned int RFU4;          // ----------------------------------
     // OFFSET:0X080
     volatile unsigned int MDR3;          // ----------------------------------
-}uart_reg_array;
+};
 
 #define SET_CONFIGMODE_A(UReg)        UReg->LCR=0x80
 #define SET_CONFIGMODE_B(UReg)        UReg->LCR=0xBF
 #define SET_OPERATIONAL_MODE(UReg)    CLEAR_BIT(UReg->LCR,7)
 
-void Set_Baudrate(int BaudRate);
-void CLearFIFO(void);
-void SC_TraMoreBytes(unsigned char CardIdx, unsigned char *SendBuf, unsigned int SendLen);
-unsigned char SC_RecMoreBytes(unsigned char CardIdx, unsigned char *RecBuf, unsigned int RecLen);
-void Put_Uart_OutLine_LOW(void);
-void Put_Uart_OutLine_Normal(void);
-int Uart_Init(void);
-void Uart_Uninit(void);
 
-#endif
+struct uart_reg_array *uart_reg = NULL;
 
+
+void set_baudrate(u32 baudrate)
+{
+    u32 div_value;
+    u32 dlh;
+    u32 dll;
+    u8 temp;
+
+
+//    TRACE_TO("enter %s, BaudRate = %X\n", __FUNCTION__, baudrate);
+
+    temp = uart_reg->LCR;
+   
+    SET_CONFIGMODE_B(uart_reg);
+    SET_BIT(uart_reg->Reg3.EFR, 4);         // Enables writing to IER_REG bits [7:4], FCR_REG bits [5:4], and MCR_REG bits [7:5]
+    SET_OPERATIONAL_MODE(uart_reg);
+    uart_reg->Reg2.IER = 0x0;                // Clear register IER,Disable all the UART interrupt and Disable sleep mode
+    SET_CONFIGMODE_B(uart_reg);
+
+//	INFO_TO("%s ==> BaudRate = %d\n", __FUNCTION__, baudrate);
+	
+    div_value=48000000/(16*baudrate);
+    dlh = div_value / 256;
+    dll = div_value % 256;
+
+    uart_reg->Reg2.DLH = dlh;
+    uart_reg->Reg1.DLL = dll;
+
+    SET_CONFIGMODE_B(uart_reg);      // Disables writing to IER_REG bits [7:4], FCR_REG bits [5:4], and MCR_REG bits [7:5]
+    CLEAR_BIT(uart_reg->Reg3.EFR, 4);
+
+    uart_reg->LCR = temp;
+
+//	TRACE_TO("exit %s\n", __func__);
+}
+
+static void uart_init_reg(void)
+{
+
+    TRACE_TO("enter %s\n", __func__);
+
+	SET_BIT(uart_reg->SYSC, 1);         // reset UART module
+    while(BITisCLEAR(uart_reg->SYSS, 0));            // wait for the end of the reset operation complete
+
+    SET_CONFIGMODE_B(uart_reg);
+    SET_BIT(uart_reg->Reg3.EFR, 4);
+    SET_CONFIGMODE_A(uart_reg);
+    SET_BIT(uart_reg->Reg4.MCR, 6);
+    uart_reg->Reg3.FCR = 0x01;    //  FIFO_EN: enbale
+    SET_CONFIGMODE_B(uart_reg);
+    uart_reg->Reg7.TLR = 0xFF;    // RX_FIFO_TRIG: 15 * 4 bytes, TX_FIFO_TRIG: 15 * 4 bytes,
+
+    uart_reg->MDR1 = 0x07;              // Disable UART, it is mandatory that MODE_SELECT = Disable before initializing or modifying clock parameter controls
+    set_baudrate(9600);   // set default fidi = 11
+    
+    uart_reg->LCR = ((DATALEN_8BITS << 0) | (STOPLEN_1BIT << 2) | (PARITY_EN << 3) | (PARITY_EVEN << 4));  // Even parity, 1 stop bit, 8 data bits
+    uart_reg->MDR1 = 0x00;              // UART 16x mode
+    SET_OPERATIONAL_MODE(uart_reg);
+
+	TRACE_TO("exit %s\n", __func__);
+}
+
+void uart_clear_fifo(void)
+{
+    SET_BIT(uart_reg->Reg3.FCR, 1); // clears the receive FIFO and resets its counter logic to 0 after clearing FIFO
+}
+
+void put_uart_outline_low(void)
+{
+    SET_BIT(uart_reg->LCR, 6);
+}
+void put_uart_outline_normal(void)
+{
+    CLEAR_BIT(uart_reg->LCR, 6);
+}
+
+static void uart_trans_one_byte(struct icc_info *icc, u8 data)
+{
+    u8 i;
+
+
+    uart_reg->Reg1.THR = data;
+    while(BITisCLEAR(uart_reg->Reg5.LSR, b_TX_SR_E));    // waiting for transmitter complete
+
+    for(i = 0; i < (icc->extra_GT + 1); i++)
+    {
+        udelay(icc->cur_ETU);
+    }
+}
+
+static int uart_recv_one_byte(struct icc_info *icc, u8 *data)
+{
+    u8 tempReg;
+
+
+    while(BITisCLEAR(uart_reg->Reg5.LSR, b_RX_FIFO_E))        // waiting for a data be received
+    {
+        if(icc->common->time_out == true)
+			return	-ICC_ERRORCODE_ICC_MUTE;
+    }
+
+    set_waiting_timer(icc, icc->WT);
+
+    *data = uart_reg->Reg1.RHR;
+    tempReg = uart_reg->Reg5.LSR;
+	
+    if(BITisSET(tempReg, b_RX_FIFO_STS))    // whether parity error, framing error, or break occure
+    {
+        if(BITisSET(tempReg, b_RX_BI))
+        {
+            return	-ICC_ERRORCODE_HW_ERROR;
+        }
+        if(BITisSET(tempReg, b_RX_FE))
+        {
+            return	-ICC_ERRORCODE_FRAMERROR;
+        }
+        if(BITisSET(tempReg, b_RX_PE))
+        {
+            return	-ICC_ERRORCODE_XFR_PARITY_ERROR;
+        }
+    }
+    if(BITisSET(tempReg, b_RX_OE))
+    {
+        return	-ICC_ERRORCODE_XFR_OVERRUN;
+    } 
+    
+    return	0; 
+}
+
+void ifd_send_bytes(struct icc_info *icc, u8 *send_buf, u32 send_len)
+{
+//	TRACE_TO("enter %s\n", __func__);
+	
+    set_waiting_timer(icc, icc->WT);
+    if(icc->direct == DIRECT_CONVENTION)    // Direct convention, states H encodes value 1, LSB first
+    {
+        while(send_len--)
+            uart_trans_one_byte(icc, *(send_buf++));
+    }
+    else                                                  // Inverse convention, states L encodes value 1, MSB first
+    {
+        while(send_len--)
+            uart_trans_one_byte(icc, byte_direct_2_inverse(*send_buf++));
+
+    }
+	
+    uart_clear_fifo();
+
+//	TRACE_TO("exit %s\n", __func__);
+
+}
+
+int ifd_receive_bytes(struct icc_info *icc, u8 *rec_buf, u32 rec_len)
+{
+    int ret = 0;
+
+
+//    TRACE_TO("enter %s\n", __func__);
+	
+    if(icc->direct == DIRECT_CONVENTION)    // Direct convention, states H encodes value 1, LSB first
+    {
+        while(rec_len--)
+        {
+            ret = uart_recv_one_byte(icc, rec_buf);
+//			TRACE_TO("ret = %d\n", ret);
+            if(ret)
+            {
+                ERROR_TO("fail to receive uart data, ret = %d\n", ret);
+                goto	err;
+            }
+
+            rec_buf++;
+        }
+    }
+    else                                                  // Inverse convention, states L encodes value 1, MSB first
+    {
+        while(rec_len--)
+        {
+            ret = uart_recv_one_byte(icc, rec_buf);
+            *rec_buf = byte_direct_2_inverse(*rec_buf);
+            if(ret == -ICC_ERRORCODE_XFR_PARITY_ERROR)
+            {
+                ret = 0;
+            }
+			
+            if(ret)
+            {
+                ERROR_TO("fail to receive uart data, ret = %d\n", ret);
+                goto	err;
+            }
+
+            rec_buf++;
+        }
+    }
+
+err:
+//	TRACE_TO("exit %s\n", __func__);
+	return	ret;
+}
+
+int uart_init(void)
+{
+	int	ret;
+
+	
+    TRACE_TO("enter %s\n", __func__);
+	
+    uart_reg = (struct uart_reg_array *)ioremap(PhyAddr_UART, AddrSize_UART);
+    if(!uart_reg)
+    {
+        ERROR_TO("unable to ioremap\n");
+        ret = -EFAULT;
+		goto err;
+    }
+	
+    uart_init_reg();
+	
+    ret = 0;
+
+err:
+	TRACE_TO("exit %s\n", __func__);
+	
+	return	ret;
+}
+
+void uart_uninit(void)
+{
+    iounmap(uart_reg);
+    uart_reg = NULL;
+}
 

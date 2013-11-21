@@ -8,7 +8,7 @@ AR=$(CROSS_COMPILE)ar
 LD=$(CROSS_COMPILE)ld
 CC=$(CROSS_COMPILE)gcc
 
-#SLDFLAGS=-static
+LDFLAGS=-static
 
 DEBFLAGS=-O2
 PWD:=$(shell pwd)

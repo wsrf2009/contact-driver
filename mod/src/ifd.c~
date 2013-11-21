@@ -20,7 +20,7 @@
 
 
 
-#define	IFD_MAX_SLOT_NUMBER		5	
+#define	IFD_MAX_SLOT_NUMBER		3	
 
 enum	ifd_command
 {
@@ -99,8 +99,6 @@ static long ifd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	}
 
 	icc = &common->icc[slot];
-
-	TRACE_TO("slot = %02X\n", icc->slot);
 	
 //    if(common->previous_slot >= IFD_MAX_SLOT_NUMBER)
 //    {
@@ -312,7 +310,7 @@ static int ifd_init(void)
 		goto err1;
 
 	common->previous_slot = 0xFF;
-	common->freq = 4300000;
+	common->freq = 4000000;
 	common->sem_inc = 0;
 
 	ret = misc_register(&ifd_misc);

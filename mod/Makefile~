@@ -15,7 +15,7 @@ src:=src
 obj-m := tda8026.o
 tda8026-objs := ifd.o
 
-KERNELDIR?=/opt/acr890/linux-2.6.37/
+KERNELDIR?=/opt/280/linux/kernel/
 
 modules:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD)

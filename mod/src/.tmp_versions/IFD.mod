@@ -1,0 +1,2 @@
+/opt/acr910/2.6.37/drivers/SmartCard/src/IFD.ko
+/opt/acr910/2.6.37/drivers/SmartCard/src/AT83C26.o /opt/acr910/2.6.37/drivers/SmartCard/src/Common.o /opt/acr910/2.6.37/drivers/SmartCard/src/Gpio.o /opt/acr910/2.6.37/drivers/SmartCard/src/Protocol_ATR.o /opt/acr910/2.6.37/drivers/SmartCard/src/Protocol_Param.o /opt/acr910/2.6.37/drivers/SmartCard/src/Protocol_T0.o /opt/acr910/2.6.37/drivers/SmartCard/src/Protocol_T1.o /opt/acr910/2.6.37/drivers/SmartCard/src/SmartCard.o /opt/acr910/2.6.37/drivers/SmartCard/src/Timer.o /opt/acr910/2.6.37/drivers/SmartCard/src/UART.o

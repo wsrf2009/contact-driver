@@ -114,7 +114,7 @@ unsigned char CardPowerOn(unsigned char slot)
         printf("slot%d ATR:", slot);
         for(i = 0; i < UsrParam.oDataLen; i++ )
         {
-            printf(" 0x%X", RecBuf[i]);
+            printf(" %02X", RecBuf[i]);
         }
         printf("\n\n");
         return(1);
@@ -123,339 +123,220 @@ unsigned char CardPowerOn(unsigned char slot)
 
 void CardOPeration(int choice1, unsigned char slot)
 {
-    long retval;
-    FILE * txtfd;
-    char fbuf[1024];
-    char *pBuf;
-    int i;
-    int TempLen;
-    int choice2;
+	long retval;
+	FILE * txtfd;
+	char fbuf[1024];
+	char *pBuf;
+	unsigned int i;
+	unsigned int TempLen;
+	int choice2;
+	unsigned char tmpData;
+	unsigned char n;
+	char *preCmd = NULL;
+	char *curPro;
 
-    UsrParam.p_oBuf = RecBuf;
-    UsrParam.p_iBuf = CmdBuf;
+	UsrParam.p_oBuf = RecBuf;
+	UsrParam.p_iBuf = CmdBuf;
 
 
-    switch(choice1)
-    {
-        case '1':
-        {
-            CardPowerOn(slot);
-            break;            
-        }
-        case '2':
-        {
-            ioctl(fd, IFD_CMD(PowerOff, slot), &UsrParam);
-            break;
-        }
-        case '3':
-        {
-            do
-            {
-                printf("Exchange Apdu with slot%d:\n",slot);
-                printf("==============================================\n\n");
-                printf("1: ACOS3 T0 Test\n");
-                printf("2: ACOS5 Test\n");
-                printf("3: ACOS6 Test\n");
-//                printf("4: ACOS7 Test\n");
-//                printf("5: ACOS9 Test\n");
-                printf("6: JCOP30 T1 Test\n");
-                printf("\n");
-                printf("0: Exit the test program\n\n");
-                printf("==============================================\n\n");
+	switch(choice1)
+	{
+		case '1':
+		{
+			CardPowerOn(slot);
+			break;            
+		}
 
-                choice2 = getc(stdin);
-                if(choice2 == 10)
-                {
-                   choice2 = getc(stdin);
-                }
+		case '2':
+		{
+ 			ioctl(fd, IFD_CMD(PowerOff, slot), &UsrParam);
+			break;
+ 		}
 
-                if(choice2 == '1')
-                {
-                    txtfd = fopen("ACOS3T0Test.txt","r");
-                    if(txtfd == NULL)
-                    {
-                        printf("fail to open the file: ACOS3T0Test.txt");
-                    }
-                }
-                else if(choice2 == '2')
-                {
-                    txtfd = fopen("ACOS5Test.txt","r");
-                    if(txtfd == NULL)
-                    {
-                        printf("fail to open the file: ACOS5Test.txt");
-                    }
-                }
-                else if(choice2 == '3')
-                {
-                    txtfd = fopen("ACOS6Test.txt","r");
-                    if(txtfd == NULL)
-                    {
-                        printf("fail to open the file: ACOS6Test.txt");
-                    }
-                }
-/*                else if(choice2 == '4')
-                {
-                    txtfd = fopen("ACOS7Test.txt","r");
-                    if(txtfd == NULL)
-                    {
-                        printf("fail to open the file: ACOS7Test.txt");
-                    }
-                }
-                else if(choice2 == '5')
-                {
-                    txtfd = fopen("ACOS9Test.txt","r");
-                    if(txtfd == NULL)
-                    {
-                        printf("fail to open the file: ACOS9Test.txt");
-                    }
-                }
-*/                else if(choice2 == '6')
-                {
-                    txtfd = fopen("JCOP30.txt","r");
-                    if(txtfd == NULL)
-                    {
-                        printf("fail to open the file: JCOP30.txt");
-                    }
-                }
+		case '3':
+		{
+			do
+			{
+				printf("Exchange Apdu with slot%d:\n",slot);
+				printf("==============================================\n\n");
+				printf("1: ACOS3 T0 Test\n");
+				printf("2: ACOS5 Test\n");
+				printf("3: ACOS6 Test1\n");
+//				printf("4: ACOS6 Test2\n");
+				printf("6: JCOP30 T1 Test\n");
+				printf("\n");
+				printf("0: Exit the test program\n\n");
+				printf("==============================================\n\n");
 
-                if(txtfd != NULL)
-                {
-                    while( fgets(fbuf, 1024, txtfd) != NULL)
-                    {
-                    if(*fbuf == ';')
-                    {
-                        printf("%s",fbuf);
-                    }
-                    else if(*fbuf == '\n');
-                    else if(strstr(fbuf, ".RESET") != NULL)
-                    {
-                        CardPowerOn(slot);
-                    }
-                    else if(strstr(fbuf, "Command:") != NULL)
-                    {
-                        pBuf = fbuf + 9;
-                        i = 0;
-                        while(*pBuf != '\n' && *pBuf != ' ')
-                        {
-                            CmdBuf[i] = StrToHex(pBuf, 2);
-                            pBuf += 3;
-                            i++;
-                        }
+				choice2 = getc(stdin);
+				if(choice2 == 10)
+				{
+					choice2 = getc(stdin);
+				}
+
+				if(choice2 == '1')
+				{
+					curPro = "acos3 test";
+					txtfd = fopen("acos3Test.txt","r");
+					if(txtfd == NULL)
+					{
+						printf("fail to open the file: ACOS3T0Test.txt");
+					}
+				}
+				else if(choice2 == '2')
+				{
+					curPro = "acos5 test";
+					txtfd = fopen("acos5Test.txt","r");
+					if(txtfd == NULL)
+					{
+						printf("fail to open the file: ACOS5Test.txt");
+					}
+				}
+				else if(choice2 == '3')
+				{
+					curPro = "acos6 test1";
+					txtfd = fopen("acos6Test1.txt","r");
+ 					if(txtfd == NULL)
+					{
+						printf("fail to open the file: ACOS6Test1.txt");
+					}
+				}
+				#if 0
+				else if(choice2 == '4')
+				{
+					curPro = "acos6 test2";
+					txtfd = fopen("acos6Test2.txt","r");
+					if(txtfd == NULL)
+					{
+						printf("fail to open the file: ACOS6Test2.txt");
+					}
+				}
+				#endif
+				else if(choice2 == '6')
+				{
+					curPro = "jcop30 test";
+					txtfd = fopen("jcop30Test.txt","r");
+					if(txtfd == NULL)
+					{
+						printf("fail to open the file: JCOP30.txt");
+					}
+				}
+
+				if(txtfd != NULL)
+				{
+			
+					while( fgets(fbuf, 1024, txtfd) != NULL)
+					{
+						if(*fbuf == ';')
+						{
+							printf("%s",fbuf);
+						}
+						else if(*fbuf == '\n');
+						else if(strstr(fbuf, ".RESET") != NULL)
+						{
+							CardPowerOn(slot);
+						}
+						else if(strstr(fbuf, "Command:") != NULL)
+						{
+							preCmd = "Command:";
+							pBuf = fbuf + 9;
+							i = 0;
+							while(*pBuf != '\n' && *pBuf != ' ')
+							{
+								CmdBuf[i] = StrToHex(pBuf, 2);
+								pBuf += 3;
+								i++;
+							}
          
-                        UsrParam.p_iBuf = CmdBuf;
-                        UsrParam.iDataLen = i;
-                        UsrParam.oDataLen = 271;
+							UsrParam.p_iBuf = CmdBuf;
+							UsrParam.iDataLen = i;
+							UsrParam.oDataLen = 271;
+	
+							PrtMsg("%s",fbuf);
 
-                        PrtMsg("\n\nCMD Len: %d\n", UsrParam.iDataLen);
-                        PrtMsg("slot%d CMD:", slot);
-                        for(i = 0; i < UsrParam.iDataLen; i++ )
-                        {
-                            PrtMsg("0x%X ", UsrParam.p_iBuf[i]);
-                        }
-                        PrtMsg("\n\n");
 
-                        if((retval = ioctl(fd, IFD_CMD(XfrAPDU, slot), &UsrParam)) < 0)
-                        {
-                            PrtMsg("\nOperation fail with errorcode = %lX\n", retval);
-                            break;
-                        }
-                        else
-                        {
+							if((retval = ioctl(fd, IFD_CMD(XfrAPDU, slot), &UsrParam)) < 0)
+							{
+								PrtMsg("\nOperation fail with errorcode = %lX\n", retval);
+								break;
+							}
+							else
+							{
+								PrtMsg("Response:");
+								for(i = 0; i < UsrParam.oDataLen; i++ )
+								{
+									PrtMsg(" %02X", RecBuf[i]);
+								}
+								PrtMsg("\n\n");
 
-                            PrtMsg("Response Length: %d\n", UsrParam.oDataLen);
-                            PrtMsg("Response Data:");
-                            for(i = 0; i < UsrParam.oDataLen; i++ )
-                            {
-                                PrtMsg("0x%X ", RecBuf[i]);
-                            }
-                            PrtMsg("\n\n");
+							}
+						}
+						else if(strstr(fbuf, "Response:") != NULL)
+						{
+							if(strcmp(preCmd, "Command:") != 0)
+								goto err;
+			    
+							preCmd = "Response:";
+			    
+						    pBuf = fbuf + 10;
+							i = 0;
+							n = 0;
 
-                            fgets(fbuf, 1024, txtfd);
-                            if(strstr(fbuf, "Response:") != NULL)
-                            { 
-                                pBuf = fbuf + 10;
-                                i = 0;
-                                while(*pBuf != '\n' && *pBuf != ' ')
-                                {
-                                    if(*pBuf == 'x' || *pBuf == 'X');
-                                    else
-                                    {
-                                        if(RecBuf[i] != StrToHex(pBuf, 2))
-                                        { 
-                                            goto exchangefail;
-                                        }
-                                    }
-                                    pBuf += 3;
-                                    i++;
-                                }
-                                    TempLen = i;
-
-                                if(TempLen == UsrParam.oDataLen)
-                                {
-                                    PrtMsg("Success to Exchange with the slot%d!\n", slot);
-                                    PrtMsg("\n\n");
-                                }
-                                    else
-                                {
-exchangefail:
-                                    PrtMsg("Fail to Exchange with the slot%d!\n", slot);
-                                    PrtMsg("The expected data:\n");
-                                    PrtMsg("%s",fbuf);
-                                    PrtMsg("\n\n");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+							while((*pBuf != '\n') && (*pBuf != ' ') && (*pBuf != '\0') && (*pBuf != 0))
+							{
+								if(*pBuf == 'x' || *pBuf == 'X')
+								{
+								#if 0
+									pBuf++;
+									n++;
+									if(n == 2)
+									{
+										n = 0;
+										pBuf++;
+										i++;
+									}
+								#endif
+								}
+								else
+								{
+									tmpData = StrToHex(pBuf, 2);
+									if(RecBuf[i] != tmpData)
+									{ 
+										printf("faild at index = %d, card data = %02X, expect data = %02X\n\n", i, RecBuf[i], tmpData);
+										goto exchangefail;
+									}
+								}
+								pBuf += 3;
+								i++;
+							}
+							TempLen = i;
+			
+							if(TempLen != UsrParam.oDataLen)
+							{
+exchangefail:                    	
+								PrtMsg("expect %s",fbuf);
+								PrtMsg("\n");
+								goto err;
+							}
+                           
+						}
+					}
+					printf("^_^ %s sucessfully ^_^\n\n", curPro);
+				}
+				else
+				{
+err:
+					printf("@_@ %s failed @_@\n\n", curPro);
+				}
             
-        }while(choice2 != '0');
-#if 0
-            txtfd = fopen("ACOS3T0Test.txt","r");
-            if(txtfd == NULL)
-            {
-                printf("fail to open the file: JCOP30.txt");
-            }
-            else
-            {
+			}while(choice2 != '0');
+		}
 
-                while( fgets(fbuf, 1024, txtfd) != NULL)
-                {
-
-                    while(*fbuf == 0x0D && *(fbuf + 1) == 0x0A) fgets(fbuf, 1024, txtfd);
-                    pBuf = fbuf;
-                    i = 0;
-                    while(*pBuf != '\n' && *pBuf != ' ')
-                    {
-                        CmdBuf[i] = StrToHex(pBuf, 2);
-                        pBuf += 3;
-                        i++;
-                    }
-         
-                    UsrParam.p_iBuf = CmdBuf;
-                    UsrParam.iDataLen = i;
-                    UsrParam.oDataLen = 271;
-
-                    PrtMsg("\n\nCMD Len: %d\n", UsrParam.iDataLen);
-                    PrtMsg("slot%d CMD:", slot);
-                    for(i = 0; i < UsrParam.iDataLen; i++ )
-                    {
-                        PrtMsg("0x%X ", UsrParam.p_iBuf[i]);
-                    }
-                    PrtMsg("\n\n");
-
-                    if((retval = ioctl(fd, IFD_CMD(XfrAPDU, slot), &UsrParam)) < 0)
-                    {
-                        PrtMsg("\nOperation fail with errorcode = %lX\n", retval);
-                        break;
-                    }
-                    else
-                    {
-
-                        PrtMsg("Response Length: %d\n", UsrParam.oDataLen);
-                        PrtMsg("Response Data:");
-                        for(i = 0; i < UsrParam.oDataLen; i++ )
-                        {
-                            PrtMsg("0x%X ", RecBuf[i]);
-                        }
-                        PrtMsg("\n\n");
-
-                        PrtMsg("Success to Exchange with the slot%d!\n", slot);
-                        PrtMsg("\n\n");
-
-                    }
-                }
-            }
-//#else
-            txtfd = fopen("JCOP30.txt","r");
-            if(txtfd == NULL)
-            {
-                printf("fail to open the file: JCOP30.txt");
-            }
-            else
-            {
-
-                while( fgets(fbuf, 1024, txtfd) != NULL)
-                {
-                    while(strstr(fbuf, "Command:") == NULL) fgets(fbuf, 1024, txtfd);
-
-                    pBuf = fbuf + 9;
-                    i = 0;
-                    while(*pBuf != '\n' && *pBuf != ' ')
-                    {
-                        CmdBuf[i] = StrToHex(pBuf, 2);
-                        pBuf += 3;
-                        i++;
-                    }
-         
-                    UsrParam.p_iBuf = CmdBuf;
-                    UsrParam.iDataLen = i;
-                    UsrParam.oDataLen = 271;
-
-                    PrtMsg("\n\nCMD Len: %d\n", UsrParam.iDataLen);
-                    PrtMsg("slot%d CMD:", slot);
-                    for(i = 0; i < UsrParam.iDataLen; i++ )
-                    {
-                        PrtMsg("0x%X ", UsrParam.p_iBuf[i]);
-                    }
-                    PrtMsg("\n\n");
-
-                    if((retval = ioctl(fd, IFD_CMD(XfrAPDU, slot), &UsrParam)) < 0)
-                    {
-                        PrtMsg("\nOperation fail with errorcode = %lX\n", retval);
-                        break;
-                    }
-                    else
-                    {
-
-                        PrtMsg("Response Length: %d\n", UsrParam.oDataLen);
-                        PrtMsg("Response Data:");
-                        for(i = 0; i < UsrParam.oDataLen; i++ )
-                        {
-                            PrtMsg("0x%X ", RecBuf[i]);
-                        }
-                        PrtMsg("\n\n");
-
-                        fgets(fbuf, 1024, txtfd);
-                        while(strstr(fbuf, "Response:") == NULL) fgets(fbuf, 1024, txtfd);
-
-                        pBuf = fbuf + 10;
-                        i = 0;
-                        while(*pBuf != '\n' && *pBuf != ' ')
-                        {
-                            CmdBuf[i] = StrToHex(pBuf, 2);
-                            pBuf += 3;
-                            i++;
-                        }
-                        TempLen = i;
-
-                        if( (TempLen == UsrParam.oDataLen) && ArrayCompare(UsrParam.p_iBuf, UsrParam.p_oBuf, TempLen))
-                        {
-                            PrtMsg("Success to Exchange with the slot%d!\n", slot);
-                            PrtMsg("\n\n");
-                        }
-                        else
-                        {
-                            PrtMsg("Fail to Exchange with the slot%d!\n", slot);
-                            PrtMsg("The expected data:\n");
-                            for(i = 0; i < TempLen; i++ )
-                            {
-                                PrtMsg("0x%X ", CmdBuf[i]);
-                            }
-                            PrtMsg("\n\n");
-                            break;
-                        }
-
-                    }
-                }
-            }
-#endif
-            break;
-        }
-        default:
-            printf("Invalid selection: %d\n",choice1);
-    }
+		break;
+        	
+		default:
+			printf("Invalid selection: %d\n",choice1);
+	}
 }
 
 int main()

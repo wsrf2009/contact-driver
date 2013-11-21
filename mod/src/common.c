@@ -1,75 +1,61 @@
-/*
-* Name: common source file
-* Date: 2012/10/22
-* Author: Alex Wang
-* Version: 1.0
-*/
-
-#include "atr.h"
-#include "icc.h"
-#include "debug.h"
-#include "common.h"
 
 
-unsigned char Byte_Direct2Inverse(unsigned char DirData)
+
+u8 byte_direct_2_inverse(u8 data)
 {
-    unsigned char InvData = 0;
-    unsigned char i = 0;
+    u8 inverse_data = 0;
+    u8 i = 0;
 
     
     do
     {
-        if(BITisSET(DirData,i))
-        {
-            CLEAR_BIT(InvData, (7 - i));
-        }
-        else
-        {
-            SET_BIT(InvData, (7 - i));
-        }
-        
-//        DirData >>= 1;
-//        InvData <<= 1;
+        if(BITisSET(data, i))	CLEAR_BIT(inverse_data, (7-i));
+        else		SET_BIT(inverse_data, (7-i));
+
         i++;
         
     }while(i < 8);
 
-    return(InvData);
+    return(inverse_data);
 }
 
 
-unsigned int Caculate_Etu(unsigned char FiDi)
+u32 caculate_etu(u8 FiDi, u32 f)
 {
-    unsigned int fi;
-    unsigned int di;
-    unsigned int etu;
+    u32 fi;
+    u32 di;
+    u32 etu;
 
 
     fi = FI[(FiDi>>4) & 0x0F];        // Get the Fi and Di by inquiry table FI and DI
     di = DI[FiDi & 0x0F];
 
-    etu =(fi)/(di * FRE_CNTACARD);     // calculate baud rate: 1 etu =F/(D*f)    7816-3
+    etu =(fi)/(di * (f / 1000000));     // calculate baud rate: 1 etu =F/(D*f)    7816-3
 
-    PrtMsg("%s: FiDi = %X, fi = %X, di = %X, etu = %X\n", __FUNCTION__, FiDi, fi, di, etu);
+    INFO_TO("%s ==> FiDi = %X, fi = %d, di = %d, etu = %d\n",
+				__func__, FiDi, fi, di, etu);
 
     return(etu);
 }
 
 
 
-unsigned int Caculate_BuadRate(unsigned char FiDi)
+u32 caculate_buadrate(u8 FiDi, u32 f)
 {
-    unsigned int fi;
-    unsigned int di;
-    unsigned int BaudRate;
+	u32 fi;
+	u32 di;
+	u32 baudrate;
 
+
+//	TRACE_TO("exit %s\n", __func__);
     
     fi = FI[(FiDi>>4) & 0x0F];        // Get the Fi and Di by inquiry table FI and DI
     di = DI[FiDi & 0x0F];
-    BaudRate = (di * FRE_CNTACARD * 1000000)/fi;
+    baudrate = (di * f)/fi;
 
-    PrtMsg("%s: FiDi = %X, fi = %X, di = %X, BaudRate = %X\n", __FUNCTION__, FiDi, fi, di, BaudRate);
+    INFO_TO("%s ==> FiDi = %X, fi = %d, di = %d, BaudRate = %d\n",
+				__func__, FiDi, fi, di, baudrate);
 
-    return(BaudRate);
+    return(baudrate);
 }
 
