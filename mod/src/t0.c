@@ -1,113 +1,115 @@
-/*
-* Name: Card T0 source file
-* Date: 2012/10/18
-* Author: Alex Wang
-* Version: 1.0
-*/
 
-#include <linux/delay.h>
 
-#include "t0.h"
-#include "debug.h"
-#include "uart.h"
-#include "param.h"
-#include "icc.h"
-#include "timer.h"
+//#include "t0.h"
 
-static unsigned char DispatchCardT0(unsigned char CardIdx, unsigned char *CmdBuf, unsigned int CmdLen, unsigned char *ResBuf, unsigned int *ResLen)
+
+#define APDU_WRITE                          0
+#define APDU_READ                           1
+
+#define APDU_HEADER                         0x05               // Apdu header length
+#define APDU_CLA                            0x00               // Location of the class in APDU frame
+#define APDU_INS                            0x01               // Location of the instruction in APDU frame 
+#define APDU_P1                             0x02               // Location of the parameter 1 in APDU frame
+#define APDU_P2                             0x03               // Location of the parameter 2 in APDU frame
+#define APDU_P3                             0x04               // Location of the parameter 3 in APDU frame
+
+#define PROCEDURE_BYTE_CONFLICT             0xF4
+
+
+static int icc_t0_dispatch(struct icc_info *icc, u8 *cmd_buf, u32 cmd_len, u8 *res_buf, u32 *res_len)
 {
-    unsigned char RWFlag;
-    unsigned int LEN = *(CmdBuf + APDU_P3);
-    unsigned char INS = *(CmdBuf + APDU_INS);
-    unsigned char AckCmd;
-    bool EndPollFlag = false;
-    bool RecFlag = false;
-    unsigned int DataCount = 0;
-    unsigned int DataOffset = 0;
-    unsigned char status[2];
-    unsigned char ret;
+    u8 read_write_flag;
+    u32 length = *(cmd_buf + APDU_P3);
+    u8 ins = *(cmd_buf + APDU_INS);
+    u8 ack_cmd;
+    bool end_poll_flag = false;
+    bool receive_flag = false;
+    u32 data_count = 0;
+    u32 data_offset = 0;
+    u8 status[2];
+    int ret;
 
 
-    PrtMsg("%s: CardIdx = %d, CmdLen = %d\n", __FUNCTION__, CardIdx, CmdLen);
+//    TRACE_TO("enter %s\n", __func__);
 
-    udelay(CardParam[CardIdx].CurETU * 10);
+    udelay(icc->cur_ETU * 10);
 
-    if(CmdLen > 5)
+    if(cmd_len > 5)
     {
-        RWFlag = APDU_WRITE;
+        read_write_flag = APDU_WRITE;
     }
     else
     {
-        if(CmdLen == 4)    // case 1
+        if(cmd_len == 4)    // case 1
         {
-            CmdLen = 5;
-            *(CmdBuf + APDU_P3) = 0x00;
-            LEN = 0x00;
+            cmd_len = 5;
+            *(cmd_buf + APDU_P3) = 0x00;
+            length = 0x00;
         }
-        RWFlag = APDU_READ;
+        read_write_flag = APDU_READ;
     }
 
-    SC_TraMoreBytes(CardIdx, CmdBuf, APDU_HEADER);
-    Set_WaiTingTime(CardParam[CardIdx].WT);
+    ifd_send_bytes(icc, cmd_buf, APDU_HEADER);
+    set_waiting_timer(icc, icc->WT);
 
     do
     {
-        ret = SC_RecMoreBytes(CardIdx, &AckCmd, 1);
-        udelay(CardParam[CardIdx].CurETU * 10);
-        if(ret != OK)
+        ret = ifd_receive_bytes(icc, &ack_cmd, 1);
+        udelay(icc->cur_ETU * 10);
+        if(ret)
         {
-            EndPollFlag = true;
+            end_poll_flag = true;
         }
-        else if(AckCmd == INS)    // INS
+        else if(ack_cmd == ins)    // ins
         {
             // the data transfer of all remaining data bytes(if any bytes remain)
-            if(RWFlag == APDU_WRITE)
+            if(read_write_flag == APDU_WRITE)
             {
-                SC_TraMoreBytes(CardIdx, CmdBuf + APDU_HEADER + DataOffset, LEN - DataOffset);
-                RecFlag = false;
+                ifd_send_bytes(icc, cmd_buf + APDU_HEADER + data_offset, length - data_offset);
+                receive_flag = false;
             }
             else
             {
-                if(LEN == 0)
-                 {
-                    DataOffset = 256 - DataCount;
+                if(length == 0)
+               	{
+                    data_offset = 256 - data_count;
                 }
                 else
                 {
-                    DataOffset = (unsigned int)LEN - DataCount;
+                    data_offset = (unsigned int)length - data_count;
                 }
 
-                ret = SC_RecMoreBytes(CardIdx, ResBuf+ DataCount, DataOffset);
+                ret = ifd_receive_bytes(icc, res_buf+ data_count, data_offset);
 
-                RecFlag = true;
-                DataCount += DataOffset;
+                receive_flag = true;
+                data_count += data_offset;
             }
         }
-        else if((AckCmd & 0xF0) == 0x90)    // '9X', SW1 byte
+        else if((ack_cmd & 0xF0) == 0x90)    // '9X', SW1 byte
         {
             // the reception of a SW2 byte
-            status[0] = AckCmd;
-            *(ResBuf + (DataCount++)) = AckCmd;
-            ret = SC_RecMoreBytes(CardIdx, &AckCmd, 0x01);
-            RecFlag = true;
-            status[1] = AckCmd;
-            *(ResBuf+ (DataCount++)) = AckCmd;
-            EndPollFlag = true;
+            status[0] = ack_cmd;
+            *(res_buf + (data_count++)) = ack_cmd;
+            ret = ifd_receive_bytes(icc, &ack_cmd, 0x01);
+            receive_flag = true;
+            status[1] = ack_cmd;
+            *(res_buf+ (data_count++)) = ack_cmd;
+            end_poll_flag = true;
         }
-        else if((AckCmd & 0xF0) == 0x60)
+        else if((ack_cmd & 0xF0) == 0x60)
         {
-            if(AckCmd != 0x60)           // '6X', SW1 byte
+            if(ack_cmd != 0x60)           // '6X', SW1 byte
             { 
                 // the reception of a SW2 byte
-                status[0] = AckCmd;
-                ret = SC_RecMoreBytes(CardIdx, &AckCmd, 0x01);
-                RecFlag = true;
-                if(ret == OK)
+                status[0] = ack_cmd;
+                ret = ifd_receive_bytes(icc, &ack_cmd, 0x01);
+                receive_flag = true;
+                if(!ret)
                 {
-                    status[1] = AckCmd;
-                    *(ResBuf + (DataCount++)) = status[0];
-                    *(ResBuf+ (DataCount++)) = status[1];
-                    EndPollFlag = true;
+                    status[1] = ack_cmd;
+                    *(res_buf + (data_count++)) = status[0];
+                    *(res_buf+ (data_count++)) = status[1];
+                    end_poll_flag = true;
                 }
             }
             else                         // '60', NULL byte
@@ -115,55 +117,56 @@ static unsigned char DispatchCardT0(unsigned char CardIdx, unsigned char *CmdBuf
                 // the reception of a procedure byte
             }
         }
-        else if(AckCmd == (INS ^ 0xFF))    // INS ^ 0xFF
+        else if(ack_cmd == (ins ^ 0xFF))    // INS ^ 0xFF
         {
             // the data transfer of the next data byte(if exists)
-            if(RWFlag == APDU_WRITE)
+            if(read_write_flag == APDU_WRITE)
             {
-                SC_TraMoreBytes(CardIdx, CmdBuf + APDU_HEADER + (DataOffset++), 0x01);
-                RecFlag = false;
+                ifd_send_bytes(icc, cmd_buf + APDU_HEADER + (data_offset++), 0x01);
+                receive_flag = false;
             }
             else
             {
-                ret = SC_RecMoreBytes(CardIdx, ResBuf+ (DataOffset++), 0x01);
-                RecFlag = true;
+                ret = ifd_receive_bytes(icc, res_buf+ (data_offset++), 0x01);
+                receive_flag = true;
             }
         }
         else
         {
-            ret = PROCEDURE_BYTE_CONFLICT;
+            ret = -ICC_ERRORCODE_PROCEDURE_BYTE_CONFLICT;
         }
 
-        if(ret != OK)
+        if(ret)
         {
-            EndPollFlag = true;
+            end_poll_flag = true;
 
-            if(ret == SC_PARITY_ERROR)
+            if(ret == -ICC_ERRORCODE_XFR_PARITY_ERROR)
             {
-                if(RecFlag == true)
+                if(receive_flag == true)
                 {
-                    udelay(CardParam[CardIdx].CurETU);
-                    SC_PowerOff(CardIdx);
+                    udelay(icc->cur_ETU);
+                    icc_power_off(icc);
                 }
             }
         }
-    }while(EndPollFlag == false);
+    }while(end_poll_flag == false);
     
-    *ResLen = DataCount;
+    *res_len = data_count;
+
+//	TRACE_TO("exit %s, res_len = %d, ret = %d\n",
+//				__func__, *res_len, ret);
 
     return(ret);
 }
 
 
-unsigned char ParseCardT0(unsigned char CardIdx, unsigned char *CmdBuf, unsigned int CmdLen, unsigned char *ResBuf, unsigned int *ResLen)
+static int icc_t0_parse(struct icc_info *icc, u8 *cmd_buf, u32 cmd_len, u8 *res_buf, u32 *res_len)
 {
     unsigned char ret;
 
 
-    PrtMsg("%s: CardIdx = %d, CmdLen = %d\n", __FUNCTION__, CardIdx, CmdLen);
+    ret = icc_t0_dispatch(icc, cmd_buf, cmd_len, res_buf, res_len);
 
-    ret = DispatchCardT0(CardIdx, CmdBuf, CmdLen, ResBuf, ResLen);
-    PrtMsg("%s: *ResLen = %d\n",__FUNCTION__,*ResLen);
     return(ret);
 }
 

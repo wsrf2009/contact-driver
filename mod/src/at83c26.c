@@ -1,950 +1,1186 @@
-/*
-* Name: AT83C26 source file
-* Date: 2012/10/10
-* Author: Alex Wang
-* Version: 1.0
-*/
 
-//#include "/opt/acr910/2.6.37/arch/arm/mach-omap2/include/mach/gpio.h"
 #include <linux/kernel.h>
-#include <mach/gpio.h>
-//#include <linux/gpio.h>
+#include <linux/slab.h>
+#include <linux/err.h>
+#include <linux/gpio.h>
 #include <linux/i2c.h>
 #include <linux/delay.h>
 #include <linux/string.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <asm/io.h>
+#include <linux/clk.h>
+#include <linux/err.h>
+#include <plat/clock.h>
 
 
 
-#include "debug.h"
-#include "at83c26.h"
-#include "gpio.h"
-#include "param.h"
-#include "icc.h"
-#include "uart.h"
-#include "common.h"
+#define AT83C26_DEVICE_NAME		"at83c26"
+#define AT83C26_RESET_GPIO		161
+#define AT83C26_IRQ_GPIO		156
+
+#define GENERAL_CALL_RESET		0x06
+#define RESET					0xFF
+#define WRITE_CONFIG			0x80
+#define WRITE_TIMER				0xFC
+#define WRITE_INTERFACE			0X00
+#define WRITE_CONFIG_SC_ON_DCDCB	0xF8
+#define	WRITE_SC2_INTERFACE			0xF9
+#define WRITE_SC3_INTERFACE			0xFA
+#define WRITE_SC4_INTERFACE			0xFB
+#define WRITE_SC5_INTERFACE			0xFD
+#define WRITE_DCDCB_CONFIG			0xFE
+#define WRITE_SLEW_CTRL_CONFIG		0xF7
+
+#define WRITE_COMMAND_1				GENERAL_CALL_RESET
+#define WRITE_COMMAND_2				RESET
+#define WRITE_COMMAND_3				WRITE_CONFIG
+#define WRITE_COMMAND_4				WRITE_TIMER
+#define WRITE_COMMAND_5				WRITE_INTERFACE
+#define WRITE_COMMAND_6				WRITE_CONFIG_SC_ON_DCDCB
+#define WRITE_COMMAND_7				WRITE_SC2_INTERFACE
+#define WRITE_COMMAND_8				WRITE_SC3_INTERFACE
+#define WRITE_COMMAND_9				WRITE_SC4_INTERFACE
+#define WRITE_COMMAND_10			WRITE_SC5_INTERFACE
+#define WRITE_COMMAND_11			WRITE_DCDCB_CONFIG
+#define WRITE_COMMAND_12			WRITE_SLEW_CTRL_CONFIG
+
+#define CIO_DISCON         0x00
+#define CIO_CON            0x01
+#define CIO_HIGH           0x01
+#define CIO_LOW            0x00
+
+#define SC1_VOK            0x10
+#define DCB_VOK            0x20
+#define SCB_VOK            0x40
+
+#define SCB_V00            0x00        // SCx_CFG0
+#define SCB_V18            0x01        // SCx_CFG0
+#define SCB_V30            0x02        // SCx_CFG0
+#define SCB_V50            0x03	       // SCx_CFG0
+
+#define SCB_CLK0RST0       0x0C        // SCx_CFG2: stop CCLKx with low level, CRSTx = 0
+#define SCB_CLK1RST0       0x14        // SCx_CFG2: have CCLKx runing, CRSTx = 0
+#define SCB_CLK1RST1       0x34        // SCx_CFG2: have CCLKx runing, CRSTx = 1
 
 
-static struct 
+
+struct read_command1_description
 {
-    struct i2c_client *client;
-} AT83C26;
+	u8			sc1_status;
+	u8			sc1_cfg0;
+	u8			sc1_cfg1;
+	u8			sc1_cfg2;
+	u8			sc1_cfg3;
+	u8			sc1_cfg4;
+	u8			sc1_interface;
+	u8			timer_msb;
+	u8			timer_lsb;
+	u8			capture_msb;
+	u8			capture_lsb;
+}__attribute__((packed, aligned(1)));
 
-static const unsigned char SC1_IOon[] = {0x20};             // SC1_INTERFACE: connect CIO1 to IO1
-static const unsigned char SC1_IOoff[] = {0x40};            // SC1_INTERFACE: connect CIO1 to CARDIO1 , and set it as 0
+struct read_command2_description
+{
+	u8			statusb;
+	u8			io_select;
+	u8			interface_b;
+	u8			itdis;
+}__attribute__((packed, aligned(1)));
 
-static const unsigned char SC1_CLK0RST0[] = {0x21};        // SC1_INTERFACE: Stop CCLK1 with low level, CRST1 = 0
-static const unsigned char SC1_CLK1RST0[] = {0x03};        // SC1_INTERFACE: have CCLK1 runing,         CRST1 = 0
-static const unsigned char SC1_CLK1RST1[] = {0x13};        // SC1_INTERFACE: have CCLK1 runing,         CRST1 = 1
+struct read_command3_description
+{
+	u8			sc2_cfg0;
+	u8			sc2_cfg1;
+	u8			sc2_cfg2;
+}__attribute__((packed, aligned(1)));
 
-static unsigned char VDCB_INITIAL[] = {0x03, 0x0F};
+struct read_command4_description
+{
+	u8			sc3_cfg0;
+	u8			sc3_cfg2;
+}__attribute__((packed, aligned(1)));
 
-static unsigned char SC1_PWR[] = {0x80, 0x0F, 0x00, 0x00, 0x08};        // SC1_CFG0:SC1_CFG1:SC1_CFG2:SC1_CFG3:SC1_CFG4
-static unsigned char SC2_PWR[] = {0x00, 0x00, 0x08};              // CMD:SC2_CFG0:SC2_CFG1:SC2_CFG2
-static unsigned char SC3_PWR[] = {0x00, 0x08};                    // CMD:SC3_CFG0:SC3_CFG2
-static unsigned char SC4_PWR[] = {0x00, 0x08};                    // CMD:SC4_CFG0:SC4_CFG2
-static unsigned char SC5_PWR[] = {0x00, 0x08};                    // CMD:SC5_CFG0:SC5_CFG2
+struct read_command5_description
+{
+	u8			sc4_cfg0;
+	u8			sc4_cfg2;
+}__attribute__((packed, aligned(1)));
 
-static const unsigned char SC1_INTFACE[] = {0x60};
-static const unsigned char SCx_INTFACE[] = {0x00, 0x00, 0xF0};
+struct read_command6_description
+{
+	u8			sc5_cfg0;
+	u8			sc5_cfg2;
+}__attribute__((packed, aligned(1)));
+
+struct read_command7_description
+{
+	u8			dcdcB;
+	u8			ldo;
+}__attribute__((packed, aligned(1)));
+
+struct read_command8_description
+{
+	u8			slew_ctrl_1;
+	u8			slew_ctrl_2;
+	u8			slew_ctrl_3;
+}__attribute__((packed, aligned(1)));
+
+union read_command_description
+{
+	char			recv_buf[12];
+	struct read_command1_description cmd1;
+	struct read_command2_description cmd2;
+	struct read_command3_description cmd3;
+	struct read_command4_description cmd4;
+	struct read_command5_description cmd5;
+	struct read_command6_description cmd6;
+	struct read_command7_description cmd7;
+	struct read_command8_description cmd8;
+};
 
 
-unsigned int *Reg_83C26_RESET = NULL;
-unsigned int *Reg_83c26_INT = NULL;
+struct at83c26_common
+{
+    struct i2c_client	*i2c_client;
+	struct i2c_driver	*i2c_driver;
+    
+    struct work_struct wk_at83c26;
+    struct workqueue_struct *wq_at83c26;
 
-//extern int gpio_request(unsigned gpio, const char *label);
-//extern int gpio_direction_input(unsigned gpio);
-//extern void gpio_free(unsigned gpio);
+	struct clk *sys_clkout2;
+	struct clk *sys_clkout2_src;
+	struct clk *func96m_clk;
 
-int AT83C26_ReadCmd(int Cmd,  unsigned char *data, int size) 
+
+    
+    int reset_pin;
+	int irq_pin;
+
+	union read_command_description	read_buf;
+};
+
+
+
+static struct at83c26_common *at83c26;
+
+
+
+static const u8 SC1_IOon[] = {0x20};             // SC1_INTERFACE: connect CIO1 to IO1
+static const u8 SC1_IOoff[] = {0x40};            // SC1_INTERFACE: connect CIO1 to CARDIO1 , and set it as 0
+
+static const u8 SC1_CLK0RST0[] = {0x21};        // SC1_INTERFACE: Stop CCLK1 with low level, CRST1 = 0
+static const u8 SC1_CLK1RST0[] = {0x03};        // SC1_INTERFACE: have CCLK1 runing,         CRST1 = 0
+static const u8 SC1_CLK1RST1[] = {0x13};        // SC1_INTERFACE: have CCLK1 runing,         CRST1 = 1
+
+static u8 VDCB_INITIAL[] = {0x03, 0x0F};
+
+static u8 SC1_PWR[] = {0x80, 0x12, 0x00, 0x00, 0x08};        // SC1_CFG0:SC1_CFG1:SC1_CFG2:SC1_CFG3:SC1_CFG4
+static u8 SC2_PWR[] = {0x00, 0x02, 0x08};              // CMD:SC2_CFG0:SC2_CFG1:SC2_CFG2
+static u8 SC3_PWR[] = {0x00, 0x08};                    // CMD:SC3_CFG0:SC3_CFG2
+static u8 SC4_PWR[] = {0x00, 0x08};                    // CMD:SC4_CFG0:SC4_CFG2
+static u8 SC5_PWR[] = {0x00, 0x08};                    // CMD:SC5_CFG0:SC5_CFG2
+
+static u8 SC1_INTFACE[] = {0x60};
+static u8 SCx_INTFACE[] = {0x00, 0x00, 0xFF};    // CIOx = CARDIOx, and disable these interrupt of smart card interface 2,3,4,5
+
+
+
+
+
+int at83c26_read_command(u8 cmd) 
 {
     int ret;
+	char	cmd_byte;
 
-    PrtMsg("%s with Cmd = %d\n", __FUNCTION__, Cmd);
 
-    switch (Cmd)
+//    TRACE_TO("enter %s with Cmd = %d\n", __func__, cmd);
+
+    switch (cmd)
     {
-        case 1: if (i2c_master_send(AT83C26.client, "\xFC", 1) < 0) return(-1); break;
-        case 2: if (i2c_master_send(AT83C26.client, "\xF8", 1) < 0) return(-1); break;
-        case 3: if (i2c_master_send(AT83C26.client, "\xF9", 1) < 0) return(-1); break;
-        case 4: if (i2c_master_send(AT83C26.client, "\xFA", 1) < 0) return(-1); break;
-        case 5: if (i2c_master_send(AT83C26.client, "\xFB", 1) < 0) return(-1); break;
-        case 6: if (i2c_master_send(AT83C26.client, "\xFD", 1) < 0) return(-1); break;
-        case 7: if (i2c_master_send(AT83C26.client, "\xFE", 1) < 0) return(-1); break;
-        case 8: if (i2c_master_send(AT83C26.client, "\xF7", 1) < 0) return(-1); break;
-        default: return(-1);
+        case 1:
+			cmd_byte = WRITE_COMMAND_4;
+			break;
+	    
+        case 2:
+			cmd_byte = WRITE_COMMAND_6;
+			break;
+	    
+        case 3:
+			cmd_byte = WRITE_COMMAND_7;
+			break;
+	    
+        case 4:
+			cmd_byte = WRITE_COMMAND_8;
+			break;
+	  
+        case 5:
+			cmd_byte = WRITE_COMMAND_9;
+			break;
+	    
+        case 6:
+			cmd_byte = WRITE_COMMAND_10;
+			break;
+	    
+        case 7:
+			cmd_byte = WRITE_COMMAND_11;
+			break;
+	    
+        case 8:
+			cmd_byte = WRITE_COMMAND_12;
+			break;
+	    
+        default:
+			WARN_TO("invalid paramter\n");
+	    	ret = -EINVAL;
+	    	goto err;
     }
-   
-    ret = i2c_master_recv(AT83C26.client, (char*)data, (size > 12) ? 12 : size);
-    if (ret<0)
+
+	if(!at83c26->i2c_client)
+	{
+		ERROR_TO("have not connect to i2c client\n");
+		ret = -EFAULT;
+		goto err;
+	}
+	
+	if((ret = i2c_master_send(at83c26->i2c_client, &cmd_byte, 1)) < 0)
+	{
+		ERROR_TO("fail to sending data to at83c26\n");
+		goto err;
+	}
+	
+    if((ret = i2c_master_recv(at83c26->i2c_client, at83c26->read_buf.recv_buf, 12)) < 0)
     {
-       PrtMsg("fail to receive the i2c data!\n");
-       return(-1);
+    	ERROR_TO("fail to reading data fromm at83c26\n");
+		goto err;
     }
-    return(0);
+
+//	for(i=0; i<12; i++)
+//		TRACE_TO("[%d] = %02X\n", i, at83c26->read_buf.recv_buf[i]);
+
+    ret = 0;
+    
+err:
+	
+//    TRACE_TO("exit %s\n", __func__);
+	
+    return	ret;
 }
 
-int AT83C26_SendCmd(int Cmd, unsigned char *data, int size)
+int at83c26_send_command(u8 cmd, u8 *send_buf, u32 send_len)
 {
-    char dataBuf[5];
+    char data_buf[5];
     int ret;
+//	u8 i;
     
-    PrtMsg("%s with Cmd = %d\n", __FUNCTION__, Cmd);
-    switch (Cmd)
+	
+//	TRACE_TO("enter %s with Cmd = %d\n", __func__, Cmd);
+
+//	for(i=0; i<send_len; i++)
+//		TRACE_TO("[%d] = %02X\n", i, send_buf[i]);
+
+    switch (cmd)
     {
-        case 3: 
-            memcpy(dataBuf, (char*)data, size);
-            dataBuf[0] |= 0x80; 
-            size -=1;
+        case 1:
+	    	data_buf[0] = 0x06;
+	    	send_len = 0;
+	    	break;
+		case 2:
+	    	data_buf[0] = 0xFF;
+	    	send_len = 0;
+	    	break;
+		case 3: 
+			memcpy(data_buf, (char*)send_buf, send_len);
+			data_buf[0] &= ~0xC0;
+            data_buf[0] |= 0x80; 
+            send_len -=1;
             break;
         case 4:
-            memcpy(dataBuf+1, (char*)data, size);
-            dataBuf[0] = 0xFC;
+            memcpy(data_buf+1, (char*)send_buf, send_len);
+            data_buf[0] = 0xFC;
             break;
         case 5: 
-            dataBuf[0] = (char)*data;
-            CLEAR_BIT(dataBuf[0], 7);
-            size = 0;
+            data_buf[0] = (char)*send_buf;
+			data_buf[0] &= ~0x80;
+//            CLEAR_BIT(data_buf[0], 7);
+            send_len = 0;
             break;
         case 6:
-            memcpy(dataBuf+1, (char*)data, size);
-            dataBuf[0] = 0xF8;            
+            memcpy(data_buf+1, (char*)send_buf, send_len);
+            data_buf[0] = 0xF8;            
             break;
         case 7:
-            memcpy(dataBuf+1, (char*)data, size);
-            dataBuf[0] = 0xF9;
+            memcpy(data_buf+1, (char*)send_buf, send_len);
+            data_buf[0] = 0xF9;
             break;
         case 8:
-            memcpy(dataBuf+1, (char*)data, size);
-            dataBuf[0] = 0xFA;
+            memcpy(data_buf+1, (char*)send_buf, send_len);
+            data_buf[0] = 0xFA;
             break;
         case 9:
-            memcpy(dataBuf+1, (char*)data, size);
-            dataBuf[0] = 0xFB;
+            memcpy(data_buf+1, (char*)send_buf, send_len);
+            data_buf[0] = 0xFB;
             break;
         case 10:
-            memcpy(dataBuf+1, (char*)data, size);
-            dataBuf[0] = 0xFD;
+            memcpy(data_buf+1, (char*)send_buf, send_len);
+            data_buf[0] = 0xFD;
             break;
         case 11:
-            memcpy(dataBuf+1, (char*)data, size);
-            dataBuf[0] = 0xFE;
+            memcpy(data_buf+1, (char*)send_buf, send_len);
+            data_buf[0] = 0xFE;
             break;
         case 12:
-            memcpy(dataBuf+1, (char*)data, size);
-            dataBuf[0] = 0xF7;
+            memcpy(data_buf+1, (char*)send_buf, send_len);
+            data_buf[0] = 0xF7;
             break;
 
-        default: return(-1);
+        default:
+	    	WARN_TO("invalid paramter\n");
+	    	ret = -EINVAL;
+	    	goto err;
     }
-    
-    ret = i2c_master_send(AT83C26.client, dataBuf, size+1);
-    if(ret < 0)
+
+	if(!at83c26->i2c_client)
+	{
+		ERROR_TO("have not connect to i2c client\n");
+		ret = -EFAULT;
+		goto err;
+	}
+	
+    if((ret = i2c_master_send(at83c26->i2c_client, data_buf, send_len+1)) < 0)
     {
-        PrtMsg("%s: Fail to send i2c CMD: %d, error code = %d\n", __FUNCTION__, Cmd, ret);   
-        return(-1);
+    	ERROR_TO("fail to sending data to at83c26");
+        goto err;
     }
-    return(0);
+	
+    ret = 0;
+
+err:
+
+//    TRACE_TO("exit %s\n", __func__);
+	
+    return	ret;
 }
 
-/**************************************************************************************
-** FunctionName: static int AT83C26_CIO(int CardIdx, unsigned char OpFlag)
-** Description:  connect CIOx to IO1, and IO1 = CARDIOx, disconnect CIOx to IO1, and CARDIOx=IO1
-** Paramater: CardIdx: Card index, OpFlag:CIO_SAVE,disconnect and CARDIOx=IO1;CIO_RESTORE,connect and IO1 = CARDIOx
-** Author: Alex Wang
-** Update: 2012-10-16
-** Version: 1.0
-***************************************************************************************/
-int AT83C26_CIOx(unsigned char CardIdx, unsigned char CON, unsigned char CIO)
+int at83c26_CIOx(u8 slot, u8 con, u8 cio)
 {
-    unsigned char RecBuf[12];
-    unsigned char RecBuf_1[4];
+	int ret = 0;
+	union read_command_description *rsp4 = &at83c26->read_buf;
+	u8	sc1_interface;
+	
 
-    PrtMsg("%s[%d] Start, CON = %d, CIO = %d\n", __FUNCTION__, CardIdx, CON, CIO);
+//    TRACE_TO("enter %s. slot%d, con = %d, cio = %d\n", __func__, icc->slot, con, cio);
 
-    if(CardIdx == 0)                     // Card1
+//	INFO_TO("%s ==> %s card[%d] from at83c26\n", __func__, con ? "connect" : "cut", slot);
+
+    if(slot == 0)                     // Card1
     {
-        if(AT83C26_ReadCmd(1, RecBuf, 11))    return(-1);
-        if(CON)
-        {
-            BITisSET(CardParam[CardIdx].CardStatus, ICC_ACTIVE_BIT) ? Put_Uart_OutLine_Normal() : Put_Uart_OutLine_LOW(); // 
+        if((ret = at83c26_read_command(1)) < 0)    goto done;
 
-            if(AT83C26_ReadCmd(2, RecBuf_1, 4)) 
-            {
-                return(-1);
-            }
-            RecBuf_1[1] = 0x00;                       // IO_SELECT = 0x00, CIO1 = IO1;
-            if(AT83C26_SendCmd(6, RecBuf_1 + 1, 3)) 
-            {
-                return(-1);
-            }
-            CLEAR_BIT(RecBuf[6], 6);         
+		sc1_interface = rsp4->cmd1.sc1_interface;
+		
+        if(con)
+        {
+            if((ret = at83c26_read_command(2)) < 0)
+				goto done;
+
+            rsp4->cmd2.io_select = 0x00;				// IO_SELECT = 0x00, CIO1 = IO1;
+            if((ret = at83c26_send_command(6, &rsp4->cmd2.io_select, 3)) < 0)
+				goto done;
+			
+            CLEAR_BIT(sc1_interface, 6);
         }
         else
         {
-            if(CIO)
-            {
-                SET_BIT(RecBuf[6], 0);
-            }
-            else
-            {
-                CLEAR_BIT(RecBuf[6], 0);   // set CIO1 level
-            }
-            SET_BIT(RecBuf[6], 6);
+            if(cio)		SET_BIT(sc1_interface, 0);
+            else	CLEAR_BIT(sc1_interface, 0);   // set CIO1 level
+
+            SET_BIT(sc1_interface, 6);
         }
         // send SC1_INTERFACE
-        if(AT83C26_SendCmd(5, RecBuf + 6, 1))
-        {   
-            return(-1);
-        }
+        if((ret = at83c26_send_command(5, &sc1_interface, 1)) < 0)
+			goto done;
+		
     }
     else                                     // Card2 ~ Card5
     {
-        if(AT83C26_ReadCmd(2, RecBuf, 4)) 
-        {
-            return(-1);
-        }
+        if((ret = at83c26_read_command(2)) < 0)
+			goto done;
         
-        switch(CardIdx)
+        switch(slot)
         {
             case 1: 
-                if(CON)
+                if(con)
                 {
-                    BITisSET(CardParam[CardIdx].CardStatus, ICC_ACTIVE_BIT) ? Put_Uart_OutLine_Normal() : Put_Uart_OutLine_LOW(); // 
-                    RecBuf[1] = 0x01;                  // IO_SELECT
-                    CLEAR_BIT(RecBuf[3], 4);           // ITDIS
+                    rsp4->cmd2.io_select = 0x01;                 // IO_SELECT
+                    CLEAR_BIT(rsp4->cmd2.itdis, 4);           // ITDIS
                 }
                 else
                 {
-                    if(CIO)
-                    {
-                        SET_BIT(RecBuf[2], 2);
-                    }
-                    else
-                    {
-                        CLEAR_BIT(RecBuf[2], 2);         // INTERFACEB
-                    }
-                    SET_BIT(RecBuf[3], 4);         // ITDIS
+                    if(cio)		SET_BIT(rsp4->cmd2.interface_b, 2);
+                    else	CLEAR_BIT(rsp4->cmd2.interface_b, 2);         // INTERFACEB
+
+                    SET_BIT(rsp4->cmd2.itdis, 4);         // ITDIS
                 }
                 break; 
             
             case 2: 
-                if(CON)
-                {
-                    BITisSET(CardParam[CardIdx].CardStatus, ICC_ACTIVE_BIT) ? Put_Uart_OutLine_Normal() : Put_Uart_OutLine_LOW(); // 
-                    RecBuf[1] = 0x02;                  // IO_SELECT
-                    CLEAR_BIT(RecBuf[3], 5);           // ITDIS
+                if(con)
+                {						
+                    rsp4->cmd2.io_select = 0x02;                  // IO_SELECT
+                    CLEAR_BIT(rsp4->cmd2.itdis, 5);           // ITDIS
                 }
                 else
                 {
-                    if(CIO)
-                    {
-                        SET_BIT(RecBuf[2], 3);
-                    }
-                    else
-                    {
-                        CLEAR_BIT(RecBuf[2], 3);         // INTERFACEB
-                    }
-                    SET_BIT(RecBuf[3], 5);         // ITDIS
+                    if(cio)		SET_BIT(rsp4->cmd2.interface_b, 3);
+                    else	CLEAR_BIT(rsp4->cmd2.interface_b, 3);         // INTERFACEB
+
+                    SET_BIT(rsp4->cmd2.itdis, 5);         // ITDIS
+                    
                 }
                 break; 
 
        
             case 3:
-                if(CON)
-                {
-                    BITisSET(CardParam[CardIdx].CardStatus, ICC_ACTIVE_BIT) ? Put_Uart_OutLine_Normal() : Put_Uart_OutLine_LOW(); // 
-                    RecBuf[1] = 0x03;                  // IO_SELECT
-                    CLEAR_BIT(RecBuf[3], 6);           // ITDIS
+                if(con)
+                {						
+                    rsp4->cmd2.io_select = 0x03;                  // IO_SELECT
+                    CLEAR_BIT(rsp4->cmd2.itdis, 6);           // ITDIS
                 }
                 else
                 {
-                    if(CIO)
-                    {
-                        SET_BIT(RecBuf[2], 4);
-                    }
-                    else
-                    {
-                        CLEAR_BIT(RecBuf[2], 4);         // INTERFACEB
-                    }
-                    SET_BIT(RecBuf[3], 6);         // ITDIS
+                    if(cio)		SET_BIT(rsp4->cmd2.interface_b, 4);
+                    else	CLEAR_BIT(rsp4->cmd2.interface_b, 4);         // INTERFACEB
+
+                    SET_BIT(rsp4->cmd2.itdis, 6);         // ITDIS
+                    
                 }
                 break;
 
             case 4: 
-                if(CON)
-                {
-                    BITisSET(CardParam[CardIdx].CardStatus, ICC_ACTIVE_BIT) ? Put_Uart_OutLine_Normal() : Put_Uart_OutLine_LOW(); // 
-                    RecBuf[1] = 0x04;                  // IO_SELECT
-                    CLEAR_BIT(RecBuf[3], 7);           // ITDIS
+                if(con)
+                {						
+                    rsp4->cmd2.io_select = 0x04;                  // IO_SELECT
+                    CLEAR_BIT(rsp4->cmd2.itdis, 7);           // ITDIS
                 }
                 else
                 {
-                    if(CIO)
-                    {
-                        SET_BIT(RecBuf[2], 5);
-                    }
-                    else
-                    {
-                        CLEAR_BIT(RecBuf[2], 5);         // INTERFACEB
-                    }
-                    SET_BIT(RecBuf[3], 7);         // ITDIS
+                    if(cio)		SET_BIT(rsp4->cmd2.interface_b, 5);
+                    else	CLEAR_BIT(rsp4->cmd2.interface_b, 5);         // INTERFACEB
+
+                    SET_BIT(rsp4->cmd2.itdis, 7);         // ITDIS
+                    
                 }
                 break;
            
-            default: 
-                return(-1);
+            default:
+				ret = -EBADSLT;
+				goto done;
+
         }
 
-        if(AT83C26_SendCmd(6, RecBuf+1, 3))
+        if((ret = at83c26_send_command(6, &rsp4->cmd2.io_select, 3)) < 0)
         {
-            return(-1);
+            goto done;
         }
     }
 
-    return(0);
+    
+done:
+	
+//    TRACE_TO("exit %s, ret = %X\n", __func__, ret);
+	
+    return(ret);
 }
 
-int AT83C26_CVCCx(unsigned char CardIdx, unsigned char CVCC)
+int at83c26_CVCCx(u8 slot, u8 cvcc)
 {
+    int ret;
     int i = 0;
     int mask;
-    unsigned char RecBuf[12];
+	char *card_vcc;
+	union read_command_description *rsp4 = &at83c26->read_buf;
 
-    PrtMsg("%s[%d,%d] Start\n", __FUNCTION__, CardIdx, CVCC);
 
-    if(CardIdx)                         // Card2 ~ Card5
+//    TRACE_TO("enter %s. slot%d, cvcc = %d\n", __func__, slot, cvcc);
+
+	if(cvcc == 1)
+		card_vcc = "1.8v";
+	else if(cvcc == 2)
+		card_vcc = "3.3v";
+	else if(cvcc == 3)
+		card_vcc = "5.0v";
+	else 
+		card_vcc = "0v";
+	
+	INFO_TO("%s ==> set card[%d] as %s\n", __func__, slot, card_vcc);
+
+    if(slot)                         // Card2 ~ Card5
     {
-        if(AT83C26_ReadCmd(7, RecBuf, 2))
-        { 
-            return(-1);
-        }
-        CLEAR_BIT(RecBuf[1], (CardIdx + 3));
-        if(AT83C26_SendCmd(11, RecBuf, 2))    // enable VDCB, VDCB=5.2v
-        {
-           return(-1);    
-        }
+        if((ret = at83c26_read_command(7)) < 0)	
+			goto err;
+
+        CLEAR_BIT(rsp4->cmd7.ldo, (slot+3));
+		
+        if((ret = at83c26_send_command(11, &rsp4->cmd7.dcdcB, 2)) < 0)	// enable VDCB, VDCB=5.2v
+			goto err;
+		
     }
 
     // enable CVCC
-    switch(CardIdx)
+    switch(slot)
     {
         case 0:
-            if(AT83C26_ReadCmd(1, RecBuf, 11))   
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(1)) < 0)
+				goto err;
+			
             mask = SC1_VOK;                  // VCARD1=CVCC, drive a low level on the CRST1 pin, indicate the card presence detector is open when no
-            RecBuf[1] &= 0xFC;        // card is insert, enable the internal pull-up on the CPRES pin, DCK[2:0]=1,prescaler factor=2, DCCLK=CLK/2 
-            RecBuf[1] |= CVCC;
-            if(AT83C26_SendCmd(3, RecBuf+1, 5))
-            {
-                return(-1);    // CCLK1=A2, drive the CRST1 through the CARDRST bit
-            }
-            break;
+            rsp4->cmd1.sc1_cfg0 &= 0xFC;        // card is insert, enable the internal pull-up on the CPRES pin, DCK[2:0]=1,prescaler factor=2, DCCLK=CLK/2 
+            rsp4->cmd1.sc1_cfg0 |= cvcc;
+			
+            if((ret = at83c26_send_command(3, &rsp4->cmd1.sc1_cfg0, 5)) < 0 )	// CCLK1=A2, drive the CRST1 through the CARDRST bit
+				goto err;
+			
+			break;
 
         case 1:
-            if(AT83C26_ReadCmd(3, RecBuf, 3))
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(3)) < 0)	
+				goto err;
+			
             mask = SCB_VOK;                  // VCARD2=CVCC, drive a low level on the CRST2 pin, stop CCLK2 with a low level, CCLK2=A2, 
-            RecBuf[0] &= 0xFC;
-            RecBuf[0] |= CVCC;      // indicate the card presence detector is open when no card is insert 
-            if(AT83C26_SendCmd(7, RecBuf, 3))
-            {
-                return(-1);   // enable the internal pull-up on the CPRES2 pin, SC2 working at SAM mode
-            }
+            rsp4->cmd3.sc2_cfg0 &= 0xFC;
+            rsp4->cmd3.sc2_cfg0 |= cvcc;      // indicate the card presence detector is open when no card is insert 
+
+			if((ret = at83c26_send_command(7, &rsp4->cmd3.sc2_cfg0, 3)) < 0)	// enable the internal pull-up on the CPRES2 pin, SC2 working at SAM mode
+				goto err;
+			
             break;      
 
         case 2:
-            if(AT83C26_ReadCmd(4, RecBuf, 2))
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(4)) < 0)	
+				goto err;
+
             mask = SCB_VOK;                  // VCARD3=CVCC, drive a low level on the CRST3 pin, stop CCLK3 with a low level,CCLK3=A2
-            RecBuf[0] &= 0xFC;
-            RecBuf[0] |= CVCC;
-            if(AT83C26_SendCmd(8, RecBuf, 2))
-            {
-                return(-1);
-            }
+            rsp4->cmd4.sc3_cfg0 &= 0xFC;
+            rsp4->cmd4.sc3_cfg0 |= cvcc;
+			
+            if((ret = at83c26_send_command(8, &rsp4->cmd4.sc3_cfg0, 2)) < 0)
+				goto err;
+
             break;    
 
         case 3:   
-            if(AT83C26_ReadCmd(5, RecBuf, 2))
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(5)) < 0)
+				goto err;
+
             mask = SCB_VOK;                 // VCARD4=CVCC, drive a low level on the CRST4 pin, stop CCLK4 with a low level, CCLK4=A2
-            RecBuf[0] &= 0xFC;
-            RecBuf[0] |= CVCC;
-            if(AT83C26_SendCmd(9, RecBuf, 2))
-            {
-                return(-1);
-            }
+            rsp4->cmd5.sc4_cfg0 &= 0xFC;
+            rsp4->cmd5.sc4_cfg0 |= cvcc;
+			
+            if((ret = at83c26_send_command(9, &rsp4->cmd5.sc4_cfg0, 2)) < 0)
+				goto err;
+
             break; 
 
         case 4:
-            if(AT83C26_ReadCmd(6, RecBuf, 2))
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(6)) < 0)	
+				goto err;
+
             mask = SCB_VOK;                 // VCARD5=CVCC, drive a low level on the CRST5 pin, stop CCLK5 with a low level, CCLK5=A2
-            RecBuf[0] &= 0xFC;
-            RecBuf[0] |= CVCC;
-            if(AT83C26_SendCmd(10, RecBuf, 2))
-            {
-                return(-1);
-            }
+            rsp4->cmd6.sc5_cfg0 &= 0xFC;
+            rsp4->cmd6.sc5_cfg0 |= cvcc;
+			
+            if((ret = at83c26_send_command(10, &rsp4->cmd6.sc5_cfg0, 2)) < 0)
+				goto err;
+
             break; 
 
         default:
-             PrtMsg("%s: Invalid Card slot! your slot: %d\n", __FUNCTION__, CardIdx);
-             return(-1);                                               
+	    	ret = -EBADSLT;
+            goto err;                                               
     }
 
-    if(CVCC == 0)
+    if(cvcc == 0)
     {
         return(0);
     }
 
     do
     {
-        if(i2c_master_recv(AT83C26.client, (char*)RecBuf, 4) < 0)    
-        {
-            PrtMsg("%s: CVCC fail, i2c device error!\n", __FUNCTION__);
-            return(-1);
-        }
-    }while((!(RecBuf[0] & mask)) && (++i < 100));    // whether the output voltage remains within the voltage range specified by VCARDx[1:0] bits
+        if((ret = i2c_master_recv(at83c26->i2c_client, at83c26->read_buf.recv_buf, 4)) < 0)
+			goto err;
 
-    if(!(RecBuf[0] & mask))
+    }while((!(at83c26->read_buf.recv_buf[0] & mask)) && (++i < 100));    // whether the output voltage remains within the voltage range specified by VCARDx[1:0] bits
+
+    if(!(at83c26->read_buf.recv_buf[0] & mask))
     {
-        PrtMsg("%s: fail to vcc to the slot %d\n", __FUNCTION__, CardIdx);
-        return(-1);
+    	ERROR_TO("fail to power on card slot%d\n", slot);
+        ret = -EIO;
+		goto err;
     }
 
-    PrtMsg("%s[%d,%d]: CVCC Ok\n", __FUNCTION__, CardIdx, CVCC);
-
-    return(0);
+    ret = 0;
+    
+err:
+	
+//    TRACE_TO("exit %s\n", __func__);
+	
+    return(ret);
 }
 
-int AT83C26_CCLKx(unsigned char CardIdx, unsigned char RUN, unsigned char CCLK)
+int at83c26_CCLKx(u8 slot, u8 run, u8 cclk)
 {
-    unsigned char RecBuf[12];
+    int ret;
+	union read_command_description *rsp4 = &at83c26->read_buf;
 
-    PrtMsg("%s[%d] =>RUN = %d, CCLK = %d\n", __FUNCTION__, CardIdx, RUN, CCLK);
+
+    
+//    TRACE_TO("enter %s. slot%d, run = %d, cclk = %d\n", __func__, slot, run, cclk);
+
+//	INFO_TO("%s == > set card[%d] clock %s\n", __func__, slot, run ? "run" : "stop");
 
     // Enable clock
-    switch(CardIdx)
+    switch(slot)
     {
         case 0:
-            if(AT83C26_ReadCmd(1, RecBuf, 11))
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(1)) < 0)	
+				goto err;
 
             // stop or run CCLK1 ?
-            if(RUN)
+            if(run)
             {
-                CLEAR_BIT(RecBuf[6], 5);
+                CLEAR_BIT(rsp4->cmd1.sc1_interface, 5);
             }
             else
             {
-                SET_BIT(RecBuf[6], 5);
+                SET_BIT(rsp4->cmd1.sc1_interface, 5);
+				
                 // drive a high  or low level on CCLK1
-                if(CCLK)
-                {
-                    SET_BIT(RecBuf[6], 1);
-                }
-                else
-                {
-                    CLEAR_BIT(RecBuf[6], 1);
-                }
+                if(cclk)	SET_BIT(rsp4->cmd1.sc1_interface, 1);
+                else	CLEAR_BIT(rsp4->cmd1.sc1_interface, 1);
+
             }
-            if (AT83C26_SendCmd(5, RecBuf+6, 1))
-            {
-                return(-1); // have CCLK1 runing ccroding to CKS1, CCLK1=A2, CRST1=0, CC81=0, CC41=0,CIO1=1
-            }
+			
+            if ((ret = at83c26_send_command(5, &rsp4->cmd1.sc1_interface, 1)) < 0)	// have CCLK1 runing ccroding to CKS1, CCLK1=A2, CRST1=0, CC81=0, CC41=0,CIO1=1
+				goto err;
+
             break;
  
         case 1:
-            if(AT83C26_ReadCmd(3, RecBuf, 3))
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(3)) < 0)
+				goto err;
 
             // stop or run CCLK2 ?
-            if(RUN)
+            if(run)
             {
-                CLEAR_BIT(RecBuf[2], 3);
+                CLEAR_BIT(rsp4->cmd3.sc2_cfg2, 3);
             }
             else
             {
-                SET_BIT(RecBuf[2], 3);
+                SET_BIT(rsp4->cmd3.sc2_cfg2, 3);
+				
                 // drive a high  or low level on CCLK2
-                if(CCLK)
-                {
-                    SET_BIT(RecBuf[2], 4);
-                }
-                else
-                {
-                    CLEAR_BIT(RecBuf[2], 4);
-                }
+                if(cclk)	SET_BIT(rsp4->cmd3.sc2_cfg2, 4);
+                else	CLEAR_BIT(rsp4->cmd3.sc2_cfg2, 4);
+
             }
 
-            if(AT83C26_SendCmd(7, RecBuf, 3))    //  have CCLK2 runing accroding to CKS2, CCLK2=A2, CRST2=0
-            {
-                return(-1);
-            }
+            if((ret = at83c26_send_command(7, &rsp4->cmd3.sc2_cfg0, 3)) < 0)
+				goto err;
+
             break;
 
         case 2:
-            if(AT83C26_ReadCmd(4, RecBuf, 2))
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(4)) < 0)
+				goto err;
 
             // stop or run CCLK3 ?
-            if(RUN)
+            if(run)
             {
-                CLEAR_BIT(RecBuf[1], 3);
+                CLEAR_BIT(rsp4->cmd4.sc3_cfg2, 3);
             }
             else
             {
-                SET_BIT(RecBuf[1], 3);
+                SET_BIT(rsp4->cmd4.sc3_cfg2, 3);
+				
                 // drive a high  or low level on CCLK3
-                if(CCLK)
-                {
-                    SET_BIT(RecBuf[1], 4);
-                }
-                else
-                {
-                    CLEAR_BIT(RecBuf[1], 4);
-                }
+                if(cclk)	SET_BIT(rsp4->cmd4.sc3_cfg2, 4);
+                else	CLEAR_BIT(rsp4->cmd4.sc3_cfg2, 4);
+
             }
-            if (AT83C26_SendCmd(8, RecBuf, 2))   // have CCLK3 runing accroding to CKS3, CCLK3=A2, CRST3=0
-            {
-                return(-1);
-            }
+            if ((ret = at83c26_send_command(8, &rsp4->cmd4.sc3_cfg0, 2)) < 0)
+				goto err;
+
             break;
 
         case 3:
-             if(AT83C26_ReadCmd(5, RecBuf, 2))
-             {
-                 return(-1);
-             }
+			if((ret = at83c26_read_command(5)) < 0)	
+				goto err;
          
-             // stop or run CCLK4 ?
-             if(RUN)
-             {
-                 CLEAR_BIT(RecBuf[1], 3);
-             }
-             else
-             {
-                 SET_BIT(RecBuf[1], 3);
-                 // drive a high  or low level on CCLK4
-                 if(CCLK)
-                 {
-                     SET_BIT(RecBuf[1], 4);
-                 }
-                 else
-                 {
-                     CLEAR_BIT(RecBuf[1], 4);
-                 }
-             }
-            if (AT83C26_SendCmd(9, RecBuf, 2))   // have CCLK4 runing accroding to CKS4, CCLK4=A2, CRST4=0;
-            {
-                return(-1);
-            }
+			// stop or run CCLK4 ?
+			if(run)
+			{
+				CLEAR_BIT(rsp4->cmd5.sc4_cfg2, 3);
+			}
+			else
+			{
+				SET_BIT(rsp4->cmd5.sc4_cfg2, 3);
+				 
+				// drive a high  or low level on CCLK4
+				if(cclk)	SET_BIT(rsp4->cmd5.sc4_cfg2, 4);
+				else	CLEAR_BIT(rsp4->cmd5.sc4_cfg2, 4);
+
+			}
+			if ((ret = at83c26_send_command(9, &rsp4->cmd5.sc4_cfg0, 2)) < 0)	// have CCLK4 runing accroding to CKS4, CCLK4=A2, CRST4=0;
+				goto err;	
+
             break;
 
         case 4:
-             if(AT83C26_ReadCmd(6, RecBuf, 2))
-             {
-                 return(-1);
-             }
+             if((ret = at83c26_read_command(6)) < 0)		goto err;
          
              // stop or run CCLK5 ?
-             if(RUN)
+             if(run)
              {
-                 CLEAR_BIT(RecBuf[1], 3);
+                 CLEAR_BIT(rsp4->cmd6.sc5_cfg2, 3);
              }
              else
              {
-                 SET_BIT(RecBuf[1], 3);
+                 SET_BIT(rsp4->cmd6.sc5_cfg2, 3);
+				 
                  // drive a high  or low level on CCLK5
-                 if(CCLK)
-                 {
-                     SET_BIT(RecBuf[1], 4);
-                 }
-                 else
-                 {
-                     CLEAR_BIT(RecBuf[1], 4);
-                 }
+                 if(cclk)	SET_BIT(rsp4->cmd6.sc5_cfg2, 4);
+                 else	CLEAR_BIT(rsp4->cmd6.sc5_cfg2, 4);
+
              }
-            if (AT83C26_SendCmd(10, RecBuf, 2))   // have CCLK5 runing accroding to CKS5, CCLK5=A2, CRST5=0;
-            {
-                return(-1);
-            }
+            if ((ret = at83c26_send_command(10, &rsp4->cmd6.sc5_cfg0, 2)) < 0)	// have CCLK5 runing accroding to CKS5, CCLK5=A2, CRST5=0;
+				goto err;   
+
             break;
 
         default:
-            return(-1);
+	    	ret = -EBADSLT;
+            goto err;   
     }
 
-    return(0);
+
+err:
+	
+//    TRACE_TO("exit %s\n", __func__);
+	
+    return(ret);
 }
 
-int AT83C26_CRSTx(unsigned char CardIdx, int CRST)
+int at83c26_CRSTx(u8 slot, u8 crst)
 {
-    unsigned char RecBuf[12];
-  
-    PrtMsg("%s[%d] => CRST = %d\n", __FUNCTION__, CardIdx, CRST);
+    int ret;
+	union read_command_description *rsp4 = &at83c26->read_buf;
 
-    switch(CardIdx)
+
+    
+//    TRACE_TO("enter %s. slot%d, crst = %d\n", __func__, slot, crst);
+
+//	INFO_TO("%s ==> set card[%d] crst %s\n", __func__, slot, crst ? "high" : "low");
+
+    switch(slot)
     {
         case 0:
-            if(AT83C26_ReadCmd(1, RecBuf, 11))
-            {
-                return(-1);
-            }
-            if(CRST)
-            {
-                SET_BIT(RecBuf[6], 4);
-            }
-            else
-            {
-                CLEAR_BIT(RecBuf[6], 4);
-            }
-            if (AT83C26_SendCmd(5, RecBuf+6, 1))    // whether enter a reset sequence 
-            {
-                return(-1);                         // accroding to ART1 bit value
-            }
+            if((ret = at83c26_read_command(1)) < 0)	
+				goto err;
+
+            if(crst)	SET_BIT(rsp4->cmd1.sc1_interface, 4);
+            else	CLEAR_BIT(rsp4->cmd1.sc1_interface, 4);
+
+            if ((ret = at83c26_send_command(5, &rsp4->cmd1.sc1_interface, 1)) < 0)	// whether enter a reset sequence accroding to ART1 bit value
+				goto err;
+
             break;
 
         case 1:
-            if(AT83C26_ReadCmd(3, RecBuf, 3))
-            {
-                return(-1);
-            }
-            if(CRST)
-            {
-                SET_BIT(RecBuf[2], 5);
-            }
-            else
-            {
-                CLEAR_BIT(RecBuf[2], 5);
-            }
-            if (AT83C26_SendCmd(7, RecBuf, 3))      // whether enter a reset sequence accroding to ART2 bit value
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(3)) < 0)
+				goto err;
+
+            if(crst)	SET_BIT(rsp4->cmd3.sc2_cfg2, 5);
+            else	CLEAR_BIT(rsp4->cmd3.sc2_cfg2, 5);
+
+			// whether enter a reset sequence accroding to ART2 bit value
+            if ((ret = at83c26_send_command(7, &rsp4->cmd3.sc2_cfg0, 3)) < 0)
+				goto err;
+
             break;
 
         case 2:
-            if(AT83C26_ReadCmd(4, RecBuf, 2))
-            {
-                return(-1);
-            }
-            if(CRST)
-            {
-                SET_BIT(RecBuf[1], 5);
-            }
-            else
-            {
-                CLEAR_BIT(RecBuf[1], 5);
-            }
-            if (AT83C26_SendCmd(8, RecBuf, 2))      // whether enter a reset sequence accroding to ART3 bit value
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(4)) < 0)		goto err;
+
+            if(crst)	SET_BIT(rsp4->cmd4.sc3_cfg2, 5);
+            else	CLEAR_BIT(rsp4->cmd4.sc3_cfg2, 5);
+
+			// whether enter a reset sequence accroding to ART3 bit value
+            if ((ret = at83c26_send_command(8, &rsp4->cmd4.sc3_cfg0, 2)) < 0)
+				goto err;
+
             break;  
 
         case 3:
-            if(AT83C26_ReadCmd(5, RecBuf, 2))
-            {
-                return(-1);
-            }
-            if(CRST)
-            {
-                SET_BIT(RecBuf[1], 5);
-            }
-            else
-            {
-                CLEAR_BIT(RecBuf[1], 5);
-            }
-            if (AT83C26_SendCmd(9, RecBuf, 2))      // whether enter a reset sequence accroding to ART4 bit value
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(5)) < 0)	
+				goto err;
+
+            if(crst)	SET_BIT(rsp4->cmd5.sc4_cfg2, 5);
+            else	CLEAR_BIT(rsp4->cmd5.sc4_cfg2, 5);
+
+			// whether enter a reset sequence accroding to ART4 bit value
+            if ((ret = at83c26_send_command(9, &rsp4->cmd5.sc4_cfg0, 2)) < 0)
+				goto err;
+
             break;
 
         case 4:
-            if(AT83C26_ReadCmd(6, RecBuf, 2))
-            {
-                return(-1);
-            }
-            if(CRST)
-            {
-                SET_BIT(RecBuf[1], 5);
-            }
-            else
-            {
-                CLEAR_BIT(RecBuf[1], 5);
-            }
-            if (AT83C26_SendCmd(10, RecBuf, 2))      // whether enter a reset sequence accroding to ART5 bit value
-            {
-                return(-1);
-            }
+            if((ret = at83c26_read_command(6)) < 0)		
+				goto err;
+
+            if(crst)	SET_BIT(rsp4->cmd6.sc5_cfg2, 5);
+            else	CLEAR_BIT(rsp4->cmd6.sc5_cfg2, 5);
+
+			// whether enter a reset sequence accroding to ART5 bit value
+            if ((ret = at83c26_send_command(10, &rsp4->cmd6.sc5_cfg0, 2)) < 0)
+				goto err;	
+
             break;
 
         default:
-            return(-1);    
+	    	ret = -EBADSLT;
+            goto err;       
     }
 
-    return(0);
+    
+err:
+//    TRACE_TO("exit %s\n", __func__);
+	
+    return(ret);
 }
 
-int AT83C26_Reset(void)
+int at83c26_reset(void)
 {
+    int ret;
+	
 
-    PrtMsg("Welcome to entry to the function: %s\n",__FUNCTION__);
+//    TRACE_TO("enter %s\n", __func__);
+    
+    if((ret = at83c26_send_command(2, 0, 0)) < 0)
+    {
+        goto err;
+    }
+    udelay(100);
 
     // initial slot 1:  VCARD1 = 0V, CPRES1: normal open,  CCLK1 = CLK, internal pull-up
-    if(AT83C26_SendCmd(3, SC1_PWR, sizeof(SC1_PWR)))
+    if((ret = at83c26_send_command(3, SC1_PWR, sizeof(SC1_PWR))) < 0)
     {
-        return(-1);
+        goto err;
     }
+
     // initial slot 1: CIO1 = 0, CCLK1 = 0, CRST1 = 0
-    if(AT83C26_SendCmd(5 , (unsigned char*)SC1_INTFACE, sizeof(SC1_INTFACE)))
+    if((ret = at83c26_send_command(5 , SC1_INTFACE, sizeof(SC1_INTFACE))) < 0)
     {
-        return(-1);
+        goto err;
     }
 
     // initial DCDCB: VDCB = 5.2V
-    if(AT83C26_SendCmd(11, VDCB_INITIAL, sizeof(VDCB_INITIAL)))
+    if((ret = at83c26_send_command(11, VDCB_INITIAL, sizeof(VDCB_INITIAL))) < 0)
     {
-        return(-1);
+        goto err;
     }
 
     // initial slot 2: VCARD2 = 0V, CRST2 = 0, CCLK2 = 0,  CCLK2 = CLK
-    if(AT83C26_SendCmd(7, SC2_PWR, sizeof(SC2_PWR)))
+    if((ret = at83c26_send_command(7, SC2_PWR, sizeof(SC2_PWR))) < 0)
     {
-        return(-1);
+        goto err;
     }
+	
     // initial slot 3: VCARD3 = 0V, CRST3 = 0, CCLK3 = 0,  CCLK3 = CLK
-    if(AT83C26_SendCmd(8, SC3_PWR, sizeof(SC3_PWR)))
+    if((ret = at83c26_send_command(8, SC3_PWR, sizeof(SC3_PWR))) < 0)
     {
-        return(-1);
+        goto err;
     }
     // initial slot 4: VCARD4 = 0V, CRST4 = 0, CCLK4 = 0,  CCLK4 = CLK
-    if(AT83C26_SendCmd(9, SC4_PWR, sizeof(SC4_PWR)))
+    if((ret = at83c26_send_command(9, SC4_PWR, sizeof(SC4_PWR))) < 0)
     {
-        return(-1);
+        goto err;
     }
     // initial slot 5: VCARD5 = 0V, CRST5 = 0, CCLK5 = 0,  CCLK5 = CLK
-    if(AT83C26_SendCmd(10, SC5_PWR, sizeof(SC5_PWR)))
+    if((ret = at83c26_send_command(10, SC5_PWR, sizeof(SC5_PWR))) < 0)
     {
-        return(-1);
+        goto err;
     }
 
-    if(AT83C26_SendCmd(6, (unsigned char*)SCx_INTFACE, sizeof(SCx_INTFACE)))
+    if((ret = at83c26_send_command(6, SCx_INTFACE, sizeof(SCx_INTFACE))) < 0)
     {
-        return(-1);
+        goto err;
     }
 
-
-/*    AT83C26_CRSTx(0, 1);
-    if(AT83C26_CCLKx(0, 1, 0))    return(-1);
-    if(AT83C26_CVCCx(0, 1)) return(-1);
-    mdelay(20);
-
-    if(AT83C26_CVCCx(1, 2)) return(-1);
-    if(AT83C26_CCLKx(1, 1, 0))    return(-1);
-    AT83C26_CRSTx(1, 1);*/
-    return(0);
+	return 0;
+    
+err:
+	
+    ERROR_TO("fail to initial at83c26 registers\n");
+	
+    return(ret);
 }
 
-static irqreturn_t AT83C26_Irq(int irq, void *dev_id)
+static void at83c26_wq_func(struct work_struct *work)
 {
-//    unsigned char RecBuf[12];
-/*    
-    AT83C26_ReadCmd(1, RecBuf, 2);
+    u8 temp_sc1_status;
+    u8 temp_sc1_cfg0;
+	union read_command_description *rsp4 = &at83c26->read_buf;
 
-    if(BITisSET(RecBuf[1], 4))    // a change in card status
+    
+    
+//	TRACE_TO("enter %s\n", __func__);
+    
+    at83c26_read_command(1);
+    temp_sc1_status = rsp4->cmd1.sc1_status;
+    temp_sc1_cfg0 = rsp4->cmd1.sc1_cfg0;
+    
+    at83c26_read_command(7);
+
+    if(BITisSET(temp_sc1_cfg0, 4))    // a change in card status
     {
-        SET_BIT(CardParam[SlotICC].CardStatus, ICC_STATUS_CHANGE_BIT);
-        if(BITisSET(RecBuf[0], 5))    // a card is detected
+        if(BITisSET(temp_sc1_status, 5))    // a card is detected
         {
-            SET_BIT(CardParam[SlotICC].CardStatus, ICC_PRESENT_BIT);
+			icc_status_changed(1);
         }
         else
         {
-            SET_BIT(CardParam[SlotICC].CardStatus, ICC_PRESENT_BIT);
+			icc_status_changed(0);
         }
     }
-*/
-    PrtMsg("welcome to entry the interrupt function: %s\n\n", __FUNCTION__);
+
+//	TRACE_TO("exit %s\n", __func__);
+	
+}
+
+static irqreturn_t at83c26_irq(int irq, void *dev_id)
+{
+    struct at83c26_common *at83c26 = dev_id;
+
+
+//	TRACE_TO("enter %s\n", __func__);
+	
+    schedule_work(&at83c26->wk_at83c26);
+
+//	TRACE_TO("exit %s\n", __func__);
+    
     return(IRQ_HANDLED);
 }
 
-static int AT83C26_INT_CFG(struct i2c_client *client)
+static int at83c26_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
     int ret;
+    struct at83c26_common *at83c26 = (struct at83c26_common *)(id->driver_data);
+ 
+	struct device *dev;
+	
     
-    PrtMsg("%s: start, irq = %d\n", __FUNCTION__, client->irq);
-    PrtMsg("%s: start, name = %s\n", __FUNCTION__, client->name);
-    PrtMsg("%s: start, addr = %02X\n", __FUNCTION__, client->addr);
-//    omap_cfg_reg(157);
-    Reg_83c26_INT = ioremap(GPIO157_156, 1);
-    if(Reg_83c26_INT == NULL)
-    {
-        PrtMsg("%s:IORemap register memory faild!!!\n",__FUNCTION__);
-        return(-1);
-    }
-    PrtMsg("*Reg_83c26_INT = %X\n", *Reg_83c26_INT);
-    Gpio_Init(Reg_83c26_INT, MODE4_GPIO, PULLUPDOWNENABLE, DIREC_INPUT, OFFS_16);
+    TRACE_TO("enter %s\n", __func__);
+    
+    at83c26->i2c_client = client;
 
-//    ret = gpio_request(client->irq, "at83c26_INT");
-//    if(ret < 0)
-//    {
-//        PrtMsg("%s: fail to got gpio for at83c26 INT pin(ret = %08X)!\n",__FUNCTION__, ret);
-//        return(-1);
-//    }
-    gpio_direction_input(client->irq);
-    set_irq_type(OMAP_GPIO_IRQ(client->irq), IRQ_TYPE_LEVEL_HIGH);
-//    PrtMsg("OMAP_GPIO_IRQ(157) = %d, gpio_to_irq(157) = %d \n", OMAP_GPIO_IRQ(157),gpio_to_irq(157));
-    ret = request_irq(OMAP_GPIO_IRQ(client->irq), AT83C26_Irq, IRQF_DISABLED , (char*)"at83c26_INT", NULL);
+	dev = &client->dev;
+
+	at83c26->sys_clkout2_src = clk_get(dev, "clkout2_src_ck");
+	if (IS_ERR(at83c26->sys_clkout2_src)) {
+		dev_err(dev, "Could not get clkout2_src_ck clock\n");
+		ret = PTR_ERR(at83c26->sys_clkout2_src);
+		goto err;
+	}
+
+	at83c26->sys_clkout2 = clk_get(dev, "sys_clkout2");
+	if (IS_ERR(at83c26->sys_clkout2)) {
+		dev_err(dev, "Could not get sys_clkout2\n");
+		ret = PTR_ERR(at83c26->sys_clkout2);
+		goto err1;
+	}
+
+	at83c26->func96m_clk = clk_get(dev, "cm_96m_fck");
+	if (IS_ERR(at83c26->func96m_clk)) {
+		dev_err(dev, "Could not get func cm_96m_fck clock\n");
+		ret = PTR_ERR(at83c26->func96m_clk);
+		goto err2;
+	}
+
+	clk_set_parent(at83c26->sys_clkout2_src, at83c26->func96m_clk);
+	clk_set_rate(at83c26->sys_clkout2, at83c26->func96m_clk->rate);
+	clk_enable(at83c26->sys_clkout2);
+
+	ret = gpio_request(at83c26->reset_pin, "at83c26_reset_pin");
+	if(ret)
+	{
+		ERROR_TO("fail to requesting gpio%d\n", at83c26->reset_pin);
+		goto err3;
+	}
+
+	// at83c26 hardware reset
+	gpio_direction_output(at83c26->reset_pin, 1);
+	udelay(400);
+	gpio_set_value(at83c26->reset_pin, 0);
+	udelay(200);
+	gpio_set_value(at83c26->reset_pin, 1);
+	udelay(400);
+	
+	ret = at83c26_reset();
+    if(ret < 0)          // initial each slot with low level
+        goto err5;
+    
+    INIT_WORK(&at83c26->wk_at83c26, at83c26_wq_func);
+
+	at83c26_wq_func(NULL);
+	
+	at83c26_read_command(3);
+	at83c26_read_command(4);
+	at83c26_read_command(5);
+	at83c26_read_command(6);
+	
+    ret = request_irq(client->irq, at83c26_irq, IRQF_TRIGGER_FALLING ,
+						"at83c26_interrupt", at83c26);
     if(ret)
     {
-       PrtMsg("fail to request irq: ret = %X\n",ret); 
-       return(-1);    
-    }
-    
-    enable_irq(gpio_to_irq(client->irq));
-    
-    return(0);
-}
-
-
-int AT83C26_Probe(struct i2c_client *client, const struct i2c_device_id *id)
-{
-    PrtMsg("Welcome to entry the function: %s\n",__FUNCTION__);
-
-    
-    AT83C26.client = client;
-    
-
-    
-    if(AT83C26_Reset())          // initial each slot with low level
-    {
-        AT83C26.client = NULL;
-        return(-1);
+       ERROR_TO("fail to requesting irq for at83c26\n");
+       goto err6;
     }
 
-    if(AT83C26_INT_CFG(AT83C26.client))    return(-1);
 
-    return (0);
+	TRACE_TO("exit %s\n", __func__);
+	
+	return 0;
+
+err6:
+	destroy_work_on_stack(&at83c26->wk_at83c26);
+err5:
+//	gpio_free(at83c26->irq_pin);
+//err4:
+	gpio_free(at83c26->reset_pin);
+err3:
+	clk_disable(at83c26->sys_clkout2);
+	clk_put(at83c26->func96m_clk);
+err2:
+	clk_put(at83c26->sys_clkout2);
+err1:
+	clk_put(at83c26->sys_clkout2_src);
+err:
+	at83c26->i2c_client = NULL;
+	
+	TRACE_TO("exit %s\n", __func__);
+	
+    return (ret);
 }
 
-int AT83C26_Remove(struct i2c_client *client)
+static int at83c26_remove(struct i2c_client *client)
 {
+    int ret;
 
-//    AT83C26_ChipInit();
+
+    TRACE_TO("enter %s\n", __func__);
+
+    disable_irq_nosync(client->irq);
+    free_irq(client->irq, at83c26);
+
+	destroy_work_on_stack(&at83c26->wk_at83c26);
+
+	gpio_free(at83c26->reset_pin);
 
     // initial DCDCA: shutdown DC/DCA
     SC1_PWR[1] = 0x20;
-    if(AT83C26_SendCmd(3, SC1_PWR, 2))
+    if((ret = at83c26_send_command(3, SC1_PWR, 2)) < 0)
     {
-        return(-1);
+        return(ret);
     }
+	
     // initial DCDCB: shutdown DC/DCB
     VDCB_INITIAL[0] = 0x80;
-    if(AT83C26_SendCmd(11, VDCB_INITIAL, 1))
+    if((ret = at83c26_send_command(11, VDCB_INITIAL, 1)) < 0)
     {
-        return(-1);
+        return(ret);
     }
-    
-    disable_irq(OMAP_GPIO_IRQ(client->irq));
-    free_irq(OMAP_GPIO_IRQ(client->irq), NULL);
 
-    irq_to_gpio(client->irq);
-//    gpio_free(19);
-    
+	clk_disable(at83c26->sys_clkout2);
+	clk_put(at83c26->func96m_clk);
+
+	clk_put(at83c26->sys_clkout2);
+
+	clk_put(at83c26->sys_clkout2_src);
+
+	at83c26->i2c_client = NULL;
+
+	TRACE_TO("exit %s\n", __func__);
+	
     return(0);
 }
 
-static const struct i2c_device_id at83c26_id[] = {  
-    {"at83c26", 0 }, //该i2c_driver所支持的i2c_client 
+static struct i2c_device_id at83c26_id[] = {  
+    {AT83C26_DEVICE_NAME, 0 },
     {}  
 };
 
-static struct i2c_driver AT83C26_Driver=
+static struct i2c_driver at83c26_driver =
 {
-    .probe = AT83C26_Probe,
-    .remove= AT83C26_Remove,
+    .probe = at83c26_probe,
+    .remove= at83c26_remove,
     .driver=
     {
         .owner = THIS_MODULE,
-        .name  = "at83c26",
+        .name  = AT83C26_DEVICE_NAME,
     },
-    .id_table = at83c26_id, 
+    
+//    .id_table = at83c26_id, 
 };
 
 
 
-int AT83C26_Init(void)
+static int at83c26_init(void)
 {
-    PrtMsg("welcome to entry the function: %s\n",__FUNCTION__);
+    int ret;
 
-    Reg_83C26_RESET = ioremap(GPIO13_12, 1);
-    if(Reg_83C26_RESET == NULL)
+    
+    TRACE_TO("enter %s\n", __func__);
+
+	at83c26 = kzalloc(sizeof *at83c26, GFP_KERNEL);
+	if (!at83c26)
+	{
+		ret = -ENOMEM;
+		goto err1;
+	}
+
+	at83c26->reset_pin = AT83C26_RESET_GPIO;
+	at83c26->irq_pin = AT83C26_IRQ_GPIO;
+
+	at83c26_id[0].driver_data = (kernel_ulong_t)at83c26;
+	at83c26->i2c_driver = &at83c26_driver;
+	at83c26->i2c_driver->id_table = at83c26_id;
+
+    // config AT83C26 address at i2c bus    
+    if((ret = i2c_add_driver(at83c26->i2c_driver)) < 0)
     {
-        PrtMsg("%s:IORemap register memory faild!!!\n",__FUNCTION__);
-        goto err1;
-    }
-    PrtMsg("*Reg_83C26_RESET = %X\n", *Reg_83C26_RESET);
-    Gpio_Init(Reg_83C26_RESET, MODE4_GPIO, PULLUPDOWNENABLE, DIREC_OUTPUT, OFFS_16);
-    udelay(10);
-
-    // config AT83C26 address at i2c bus
-    Set_GPIO_Low(Reg_83C26_RESET, OFFS_16);
-    udelay(160);
-    Set_GPIO_High(Reg_83C26_RESET, OFFS_16);
-    udelay(400);
-
-    if(i2c_add_driver(&AT83C26_Driver))
-    {
-        PrtMsg("%s: Fail on AT83C26\n", __FUNCTION__);
+        ERROR_TO("adding i2c device fail\n");
         goto err2;
     }
+
+	TRACE_TO("exit %s\n", __func__);
 
     return (0);
 
 err2:
-    iounmap(Reg_83C26_RESET);
+    kfree(at83c26);
 err1:
-    iounmap(Reg_83c26_INT);
-    return(-1);
+	
+	TRACE_TO("exit %s\n", __func__);
+
+    return(ret);
 }
 
-int AT83C26_Uninit(void)
+static int at83c26_uninit(void)
 {
-//    free_irq(OMAP_GPIO_IRQ(19), NULL);
-//    disable_irq(gpio_to_irq(19));
-//    irq_to_gpio(19);
-//    gpio_free(19);
-
-    i2c_del_driver(&AT83C26_Driver);
-
-    iounmap(Reg_83C26_RESET);
-    Reg_83C26_RESET = NULL;
-    iounmap(Reg_83c26_INT);
-    Reg_83c26_INT = NULL;   
+    i2c_del_driver(at83c26->i2c_driver);
     
+	kfree(at83c26);
 
     return(0);
 }

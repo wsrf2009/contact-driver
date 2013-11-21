@@ -1,23 +1,28 @@
 
-CROSS_COMPILE=/opt/acr910/arm-eabi-4.4.3/bin/arm-linux-
-AR=$(CROSS_COMPILE)ar
 export ARCH=arm
+export CROSS_COMPILE=/opt/280/linux/toolchain/bin/arm-none-linux-gnueabi-
+
+AR=$(CROSS_COMPILE)ar
 LD=$(CROSS_COMPILE)ld
 CC=$(CROSS_COMPILE)gcc
+
+#BUILD_FLAGS:=-fno-tree-scev-cprop
+#LIBPATH :=-lgcc -L/opt/280/linux/toolchain/lib/gcc/arm-none-linux-gnueabi/4.7.3
 DEBFLAGS=-02
+#KBUILD_CFLAGS := -fno-tree-scev-cprop
 PWD := $(shell pwd)
 src:=src
 
 obj-m := ifdm.o
-ifdm-objs := at83c26.o common.o gpio.o ifd.o atr.o param.o t0.o t1.o icc.o timer.o uart.o
+ifdm-objs := ifd.o
 
-KERNELDIR?=/opt/acr910/kernel/
+KERNELDIR?=/opt/280/linux/kernel/
 
 modules:
-  $(MAKE) -C $(KERNELDIR) M=$(PWD)
+	$(MAKE) -C $(KERNELDIR) M=$(PWD)
 	@echo 'Module ifd_ICC.ko was already generated'
-	@cp *.ko /mnt/hgfs/sharefiles
+#	@cp *.ko /mnt/hgfs/sharefiles
 
 clean:
 	rm -rf $(srcdir)*.o $(srcdir)*.mod.o $(srcdir)*.ko $(srcdir)*.mod.c \
-	*.o *.mod.o *.ko *.mod.c *.symvers *.order
+	*.o *.mod.o *.ko *.mod.c *.symvers *.order .*.*.cmd .tmp_versions

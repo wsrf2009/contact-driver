@@ -1,56 +1,64 @@
-/*
-* Name: Card T1 source file
-* Date: 2012/10/18
-* Author: Alex Wang
-* Version: 1.0
-*/
-
-#include <linux/string.h>
-#include <linux/delay.h>
-
-#include "t1.h"
-#include "debug.h"
-#include "param.h"
-#include "uart.h"
-#include "common.h"
-
-T1Header IFDHeader;
-T1Header ICCHeader;
-unsigned char T1_TempBlock[11];
 
 
-static unsigned char T1_xfrTPDU(unsigned char CardIdx, unsigned char *CmdBuf, unsigned int CmdLen, unsigned char *ResBuf, unsigned int *ResLen)
+#define T1_HEADER                     0x03               // Apdu header length
+#define T1_NAD                        0x00
+#define T1_PCB                        0x01
+#define T1_LEN                        0x02
+
+
+#define IFDBlockNumber                0
+#define ICCBlockNumber                1
+#define IFDChainingBit                2
+#define ICCChainingBit                3
+#define FirstAPDUBit                  7
+
+
+struct t1_header
+{  
+    unsigned char NAD;
+    unsigned char PCB;
+    unsigned char LEN;
+};
+
+
+struct t1_header IFDHeader;
+struct t1_header ICCHeader;
+u8 T1_TempBlock[11];
+
+
+static int icc_t1_xfr_tpdu(struct icc_info *icc, u8 *cmd_buf, u32 cmd_len, 
+										u8 *res_buf, u32 *res_len)
 {
-    unsigned int i;
-    unsigned int Length = CmdLen;
-    unsigned char* pCmd = CmdBuf;
-    unsigned char* pBuf = ResBuf;
-    unsigned char ret;
-    bool ParityErrorFlag = false;
+    u32 i;
+    u32 length = cmd_len;
+    u8* c_buf = cmd_buf;
+    u8* r_buf = res_buf;
+    int ret;
+    bool parity_error_flag = false;
 
 
-    PrtMsg("%s: CardIdx = %d, CmdLen = %d\n", __FUNCTION__, CardIdx, CmdLen);
+//    TRACE_TO("enter %s\n", __func__);
 
     for(i = 0; i < 20; i++)
     {
-        udelay(CardParam[CardIdx].CurETU);
+        udelay(icc->cur_ETU);
     }
 
-    SC_TraMoreBytes(CardIdx, pCmd, Length);
+    ifd_send_bytes(icc, c_buf, length);
 
-    for(i = 0, Length = 3; i < Length; i++)
+    for(i = 0, length = 3; i < length; i++)
     {
-        ret = SC_RecMoreBytes(CardIdx, pBuf++, 1);
-        if(ret != OK)
+        ret = ifd_receive_bytes(icc, r_buf++, 1);
+        if(ret)
         {
-            if(ret != SC_PARITY_ERROR)
+            if(ret != -ICC_ERRORCODE_XFR_PARITY_ERROR)
             {
-                *ResLen = i;
-                return(ret);
+                *res_len = i;
+                goto	done;
             }
             else
             {
-                ParityErrorFlag = true;
+                parity_error_flag = true;
             }
         }
         if(i == 0)
@@ -59,41 +67,44 @@ static unsigned char T1_xfrTPDU(unsigned char CardIdx, unsigned char *CmdBuf, un
         }
         else if(i == 2)
         {
-            Length = ResBuf[2] + CardParam[CardIdx].CheckSum + 3;
+            length = res_buf[2] + icc->check_sum + 3;
         }
     }
-  
-    *ResLen = i;
-    if( ParityErrorFlag == true)
+	
+    *res_len = i;
+    if( parity_error_flag == true)
     {
-        ret = SC_PARITY_ERROR;
+        ret = -ICC_ERRORCODE_XFR_PARITY_ERROR;
     }
 
+done:
+
+//	TRACE_TO("exit %s\n", __func__);
     return(ret);
 }
 
-static unsigned char T1_TPDUExchange_ErrorCheck(unsigned char CardIdx, unsigned char *IFD_DataBuf, unsigned char *Card_DataBuf)
+static int icc_t1_tpdu_exchange_error_check(struct icc_info *icc, u8 *ifd_buf, u8 *card_buf)
 {
-    unsigned char* pSend = IFD_DataBuf - 3;
-    unsigned char* pRec = Card_DataBuf - 3;
-    unsigned char TempSendBlock[3];
-    unsigned char TempRecBlock[3];
-    unsigned int i;
-    unsigned char CheckSum = 0;
-    unsigned char CurSaveByte = 0;
-    unsigned char ret;
-    unsigned int TempLen=0;
+    u8* c_buf = ifd_buf - 3;
+    u8* r_buf = card_buf - 3;
+    u8 temp_send_block[3];
+    u8 temp_recv_block[3];
+    u32 i;
+    u8 check_sum = 0;
+    u8 cur_save_byte = 0;
+    int ret;
+    u32 temp_len=0;
 
  
-    PrtMsg("%s: CardIdx = %d\n", __FUNCTION__, CardIdx);
+//    TRACE_TO("enter %s\n", __func__);
 
-    memcpy(TempSendBlock, pSend, 3);
-    memcpy(TempRecBlock, pRec, 3);
+    memcpy(temp_send_block, c_buf, 3);
+    memcpy(temp_recv_block, r_buf, 3);
 
     if((IFDHeader.PCB & 0x80) == 0x00)        // bit7: 0, I-block
     {
         // bit6 in PCB: send-sequence number
-        if(BITisSET(CardParam[CardIdx].T1ExChangeFlag, IFDBlockNumber))    // IFD block number
+        if(BITisSET(icc->T1_exchange_flag, IFDBlockNumber))    // IFD block number
         {
             IFDHeader.PCB |= 0x40;
         }
@@ -101,11 +112,11 @@ static unsigned char T1_TPDUExchange_ErrorCheck(unsigned char CardIdx, unsigned 
         {
             IFDHeader.PCB &= 0xBF;
         }
-        CardParam[CardIdx].T1ExChangeFlag ^= 0x01;    // 
+        icc->T1_exchange_flag ^= 0x01;    // 
     }
     else if((IFDHeader.PCB & 0xC0) == 0x80)   // bit7 = 1, bit6 = 0: R-block
     {
-        if(BITisSET(CardParam[CardIdx].T1ExChangeFlag, ICCBlockNumber))    // ICC block number
+        if(BITisSET(icc->T1_exchange_flag, ICCBlockNumber))    // ICC block number
         {
             IFDHeader.PCB |= 0x10;
         }
@@ -115,65 +126,64 @@ static unsigned char T1_TPDUExchange_ErrorCheck(unsigned char CardIdx, unsigned 
         }
     }
 
-    pSend[T1_NAD] = IFDHeader.NAD;
-    pSend[T1_PCB] = IFDHeader.PCB;
-    pSend[T1_LEN] = IFDHeader.LEN;
+    c_buf[T1_NAD] = IFDHeader.NAD;
+    c_buf[T1_PCB] = IFDHeader.PCB;
+    c_buf[T1_LEN] = IFDHeader.LEN;
 
-    for(i = 0; i < ((unsigned int)pSend[2] + 3); i++)
+    for(i = 0; i < ((u32)c_buf[2] + 3); i++)
     {
-        CheckSum ^= pSend[i];
+        check_sum ^= c_buf[i];
     }
-    if(BITisSET(CardParam[CardIdx].T1ExChangeFlag, IFDChainingBit))    // IFD chaining bit
+    if(BITisSET(icc->T1_exchange_flag, IFDChainingBit))    // IFD chaining bit
     {
-        CurSaveByte = pSend[i];
+        cur_save_byte = c_buf[i];
     }
-    pSend[i++] = CheckSum;
-    ret = T1_xfrTPDU(CardIdx, pSend,i, pRec, &TempLen);
-    PrtMsg("%s: ret = %X\n",__FUNCTION__,ret);
-    if(ret == OK)
+    c_buf[i++] = check_sum;
+    ret = icc_t1_xfr_tpdu(icc, c_buf, i, r_buf, &temp_len);
+    if(!ret)
     {
-        ICCHeader.NAD = pRec[T1_NAD];
-        ICCHeader.PCB = pRec[T1_PCB];
-        ICCHeader.LEN = pRec[T1_LEN];
+        ICCHeader.NAD = r_buf[T1_NAD];
+        ICCHeader.PCB = r_buf[T1_PCB];
+        ICCHeader.LEN = r_buf[T1_LEN];
         if(ICCHeader.NAD == 0x00)
         {
-            if((ICCHeader.LEN != (TempLen - 4)) || (ICCHeader.LEN == 0xFF))
+            if((ICCHeader.LEN != (temp_len - 4)) || (ICCHeader.LEN == 0xFF))
             {
-                if(CardParam[CardIdx].FirstIBlock == 1)
+                if(icc->first_Iblock == 1)
                 {
                     if((ICCHeader.PCB & 0x80) == 0x00)    // I-block
                     {
-                        ret = SLOTERROR_ICC_MUTE;
+                        ret = -ICC_ERRORCODE_ICC_MUTE;
                     }
                     else
                     {
-                        ret = SLOTERROR_T1_OTHER_ERROR;
+                        ret = -ICC_ERRORCODE_T1_OTHER_ERROR;
                     }
                 }
                 else
                 {
-                    ret = SLOTERROR_ICC_MUTE;
+                    ret = -ICC_ERRORCODE_ICC_MUTE;
                 }
             }
             else
             {
-                CheckSum = 0x00;
-                for(i = 0; i < TempLen; i++)
+                check_sum = 0x00;
+                for(i = 0; i < temp_len; i++)
                 {
-                    CheckSum ^= pRec[i];
+                    check_sum ^= r_buf[i];
                 }
-                if(CheckSum)
+                if(check_sum)
                 {
-                    ret = SLOTERROR_T1_CHECKSUM_ERROR;
+                    ret = -ICC_ERRORCODE_T1_CHECKSUM_ERROR;
                 }
             }
         }
         else
         {
-            ret = SLOTERROR_BAD_NAD;
+            ret = -ICC_ERRORCODE_NAD_VALUE_INVALID_OR_NOT_SUPPORTED;
         }
     }
-    if(ret == OK)
+    if(!ret)
     {
         if((ICCHeader.PCB & 0xC0) == 0xC0)
         {
@@ -181,254 +191,259 @@ static unsigned char T1_TPDUExchange_ErrorCheck(unsigned char CardIdx, unsigned 
             {
                 if(ICCHeader.LEN != 0x01)
                 {
-                    ret = SLOTERROR_BAD_LENTGH;
+                    ret = -ICC_ERRORCODE_BAD_LENGTGH;
                 }
             }   
             else if(ICCHeader.PCB == 0xC1)    // a IFS request
             {
                 if(ICCHeader.LEN != 1)
                 {
-                    ret = SLOTERROR_BAD_LENTGH;
+                    ret = -ICC_ERRORCODE_BAD_LENGTGH;
                 }
-                else if((pRec[3] < 0x10) || (pRec[3] > 0xFE))
+                else if((r_buf[3] < 0x10) || (r_buf[3] > 0xFE))
                 {
-                    ret = SLOTERROR_BAD_IFSC;
+                    ret = -ICC_ERRORCODE_IFSC_SIZE_INVALID_OR_NOT_SUPPORTED;
                 }
             }
             else if((ICCHeader.PCB == 0xC0) || (ICCHeader.PCB == 0xC2)) // a RESYNCH request or an ABORT request
             {
                 if(ICCHeader.LEN != 0)
                 {
-                    ret = SLOTERROR_T1_OTHER_ERROR;
+                    ret = -ICC_ERRORCODE_T1_OTHER_ERROR;
                 }
             }
             else if(ICCHeader.PCB == 0xE3)    // a WTX response
             {
                 if(ICCHeader.LEN != 1)
                 {
-                    ret = SLOTERROR_BAD_LENTGH;
+                    ret = -ICC_ERRORCODE_BAD_LENGTGH;
                 }
                 else if((IFDHeader.PCB & 0xC0) != 0xC0)
                 {
-                    ret = SLOTERROR_INVALIDBLOCK;
+                    ret = -ICC_ERRORCODE_INVALID_BLOCK;
                 }
             }
             else if(ICCHeader.PCB == 0xE1)    // a IFS response
             {
                 if(ICCHeader.LEN != 1)
                 {
-                    ret = SLOTERROR_BAD_LENTGH;
+                    ret = -ICC_ERRORCODE_BAD_LENGTGH;
                 }
                 else if((IFDHeader.PCB & 0xC0) != 0xC0)
                 {
-                    ret = SLOTERROR_INVALIDBLOCK;
+                    ret = -ICC_ERRORCODE_INVALID_BLOCK;
                 }
             }
             else if((ICCHeader.PCB == 0xE0) || (ICCHeader.PCB == 0xE2))    // a RESYNCH response or an ABORT response
             {
                 if(ICCHeader.LEN != 0)
                 {
-                    ret = SLOTERROR_BAD_LENTGH;
+                    ret = -ICC_ERRORCODE_BAD_LENGTGH;
                 }
                 else if((IFDHeader.PCB & 0xC0) != 0xC0)
                 {
-                    ret = SLOTERROR_INVALIDBLOCK;
+                    ret = -ICC_ERRORCODE_INVALID_BLOCK;
                 }
             }
             else
             {
-                ret = SLOTERROR_INVALIDBLOCK;
+                ret = -ICC_ERRORCODE_INVALID_BLOCK;
             }
         }
         else if((ICCHeader.PCB & 0xC0) == 0x80)
         {
             if(ICCHeader.LEN != 0)
             {
-                ret = SLOTERROR_BAD_LENTGH;
+                ret = -ICC_ERRORCODE_BAD_LENGTGH;
             }
             else if((ICCHeader.PCB & 0x2C) != 0)
             {
-                ret = SLOTERROR_INVALIDBLOCK;
+                ret = -ICC_ERRORCODE_INVALID_BLOCK;
             }
         }
     }
-    if(BITisSET(CardParam[CardIdx].T1ExChangeFlag, IFDChainingBit))    // IFD chaining bit
+    if(BITisSET(icc->T1_exchange_flag, IFDChainingBit))    // IFD chaining bit
     {
-        pSend[i-1] = CurSaveByte;
+        c_buf[i-1] = cur_save_byte;
     }
-    if((ret != OK) || ((ICCHeader.PCB & 0x80) != 0x00) || (pSend < pRec) || (pSend > (Card_DataBuf + ICCHeader.LEN)))
+    if((ret) || ((ICCHeader.PCB & 0x80) != 0x00) || (c_buf < r_buf) || (c_buf > (card_buf + ICCHeader.LEN)))
     {
-        memcpy(pSend, TempSendBlock, 3);
+        memcpy(c_buf, temp_send_block, 3);
     }
-    memcpy(pRec, TempRecBlock, 3);
+	
+    memcpy(r_buf, temp_recv_block, 3);
+
+//	TRACE_TO("exit %s", __func__);
+	
     return(ret);
 }
 
-static unsigned char T1_BlockTransceive_ErrorHandle(unsigned char CardIdx, unsigned char *CmdBuf, unsigned char *ResBuf)
+static int icc_t1_block_transceive_error_handler(struct icc_info *icc, u8 *cmd_buf, u8 *res_buf)
 {
-    unsigned char ret;
-    unsigned char prologBuf[3];
-    unsigned char BlockHeadBuf[5];
-    unsigned char NumRetry = 0;
-    unsigned char NumSReq = 0;
-    unsigned char NumResend = 0;
-    unsigned char lastBlockError = OK;
+	int ret;
+    u8 prolog_buf[3];
+    u8 block_head_buf[5];
+    u8 num_retry = 0;
+    u8 num_s_req = 0;
+    u8 num_resend = 0;
+    u8 last_block_error = 0;
 
 
-    PrtMsg("%s: CardIdx = %d\n", __FUNCTION__, CardIdx);
+//    TRACE_TO("enter %s\n", __func__);
 
-    prologBuf[0] = IFDHeader.NAD;
-    prologBuf[1] = IFDHeader.PCB;
-    prologBuf[2] = IFDHeader.LEN;
+    prolog_buf[0] = IFDHeader.NAD;
+    prolog_buf[1] = IFDHeader.PCB;
+    prolog_buf[2] = IFDHeader.LEN;
 	
-    memcpy(BlockHeadBuf, CmdBuf, 5);
+    memcpy(block_head_buf, cmd_buf, 5);
 	
     do
     {
-        ret = T1_TPDUExchange_ErrorCheck(CardIdx, CmdBuf, ResBuf);
-        PrtMsg("%s: ret = %X\n",__FUNCTION__, ret);
+        ret = icc_t1_tpdu_exchange_error_check(icc, cmd_buf, res_buf);
         do
         {
             
-            if(ret == OK)
+            if(!ret)
             {
                 if((ICCHeader.PCB & 0xC0) == 0xC0)    // S-Block received
                 {
                     if(ICCHeader.PCB == 0xC1)
                     {
-                        CardParam[CardIdx].IFSC = *ResBuf;
+                        icc->IFSC = *res_buf;
                     }
                     else if(ICCHeader.PCB == 0xC2)
                     {
-                        return(SLOTERROR_ICC_ABORT); 
+                        ret = -ICC_ERRORCODE_CMD_ABORTED;
+						goto err;
                     }
                     else if((ICCHeader.PCB != 0xC0) && (ICCHeader.PCB != 0xC3))
                     {
-                        ret = SLOTERROR_T1_OTHER_ERROR;
+                        ret = -ICC_ERRORCODE_T1_OTHER_ERROR;
                         break;
                     }
                     IFDHeader.PCB = ICCHeader.PCB | 0x20;
                     IFDHeader.LEN = ICCHeader.LEN;
-                    *CmdBuf = *ResBuf;
-                    NumSReq++;
-                    if(NumSReq >= 5)
+                    *cmd_buf = *res_buf;
+                    num_s_req++;
+                    if(num_s_req >= 5)
                     {
-                        return(SLOTERROR_ICC_ABORT);
+                        ret = -ICC_ERRORCODE_CMD_ABORTED;
+						goto err;
                     }
                 }
                 else if((ICCHeader.PCB & 0xC0) == 0x80)  // R-Block received
                 {
-                    if((BITisSET(CardParam[CardIdx].T1ExChangeFlag, IFDBlockNumber) && (ICCHeader.PCB & 0x10)) ||  // IFDBlockNum && R-block with a error
-                     (BITisCLEAR(CardParam[CardIdx].T1ExChangeFlag, IFDBlockNumber) && ((ICCHeader.PCB & 0x10) == 0x00)))
+                    if((BITisSET(icc->T1_exchange_flag, IFDBlockNumber) && (ICCHeader.PCB & 0x10)) ||  // IFDBlockNum && R-block with a error
+                     (BITisCLEAR(icc->T1_exchange_flag, IFDBlockNumber) && ((ICCHeader.PCB & 0x10) == 0x00)))
                     {
-                        if(BITisSET(CardParam[CardIdx].T1ExChangeFlag, ICCChainingBit))    // ICC chaining bit
+                        if(BITisSET(icc->T1_exchange_flag, ICCChainingBit))    // ICC chaining bit
                         {
-                            NumResend++;             // resend last block
-                            if(NumResend >= 3)
+                            num_resend++;             // resend last block
+                            if(num_resend >= 3)
                             {
-                                NumRetry = 3;
+                                num_retry = 3;
                             }
                             break;
                         }
-                        if(BITisSET(CardParam[CardIdx].T1ExChangeFlag, IFDChainingBit))    // IFD chaining bit
+                        if(BITisSET(icc->T1_exchange_flag, IFDChainingBit))    // IFD chaining bit
                         {
-                            NumRetry |= 0x80;
+                            num_retry |= 0x80;
                         }
                         else
                         {
-                            ret = SLOTERROR_T1_OTHER_ERROR;
+                            ret = -ICC_ERRORCODE_T1_OTHER_ERROR;
                         }
                     }
                     else
                     {
-                        PrtMsg("+++++++++++++++++++++++++++++++++++++++++++++++\n");
-                        IFDHeader.NAD = prologBuf[0];
-                        IFDHeader.PCB = prologBuf[1];
-                        IFDHeader.LEN = prologBuf[2];
-                        memcpy(CmdBuf, BlockHeadBuf, 5);
-                        NumResend++;
-                        if(NumResend >= 3)
+                        IFDHeader.NAD = prolog_buf[0];
+                        IFDHeader.PCB = prolog_buf[1];
+                        IFDHeader.LEN = prolog_buf[2];
+                        memcpy(cmd_buf, block_head_buf, 5);
+                        num_resend++;
+                        if(num_resend >= 3)
                         {
-                            NumResend = 3;
+                            num_resend = 3;
                         }
                         else
                         {
                             if((IFDHeader.PCB & 0x80) == 0x00)
                             {
-                                CardParam[CardIdx].T1ExChangeFlag ^= 0x01;    // IFD block number
-                                CardParam[CardIdx].FirstIBlock = 0;
+                                icc->T1_exchange_flag ^= 0x01;    // IFD block number
+                                icc->first_Iblock = 0;
                             }
                         }
                     }
                 }
                 else                                                    // I-Block received
                 {
-                    if(BITisSET(CardParam[CardIdx].T1ExChangeFlag, IFDChainingBit))       // IFD chaining bit
+                    if(BITisSET(icc->T1_exchange_flag, IFDChainingBit))       // IFD chaining bit
                     {
-                        ret = SLOTERROR_T1_OTHER_ERROR;
+                        ret = -ICC_ERRORCODE_T1_OTHER_ERROR;
                         break;
                     }
-                    if((BITisSET(CardParam[CardIdx].T1ExChangeFlag,ICCBlockNumber) && (ICCHeader.PCB & 0x40)) ||   // ICCBlockNum && 
-                    	((BITisCLEAR(CardParam[CardIdx].T1ExChangeFlag,ICCBlockNumber) && ((ICCHeader.PCB & 0x40) == 0x00))))
+                    if((BITisSET(icc->T1_exchange_flag,ICCBlockNumber) && (ICCHeader.PCB & 0x40)) ||   // ICCBlockNum && 
+                    	((BITisCLEAR(icc->T1_exchange_flag,ICCBlockNumber) && ((ICCHeader.PCB & 0x40) == 0x00))))
                     {
                         if(ICCHeader.PCB & 0x20)
                         {
-                            SET_BIT(CardParam[CardIdx].T1ExChangeFlag, ICCChainingBit);    // set ICC chaining bit
+                            SET_BIT(icc->T1_exchange_flag, ICCChainingBit);    // set ICC chaining bit
                         }
                         else
                         {
-                            CLEAR_BIT(CardParam[CardIdx].T1ExChangeFlag, ICCChainingBit);    // reset ICC chaining bit
+                            CLEAR_BIT(icc->T1_exchange_flag, ICCChainingBit);    // reset ICC chaining bit
                         }
-                        NumRetry |= 0x80;
-                        CardParam[CardIdx].T1ExChangeFlag ^= 0x02;
+                        num_retry |= 0x80;
+                        icc->T1_exchange_flag ^= 0x02;
                     }
                     else
                     {
-                        ret = SLOTERROR_INVALIDBLOCK;
+                        ret = -ICC_ERRORCODE_INVALID_BLOCK;
                     }
                 }
             }
         }while(0);
 
-	if(ret == SLOTERROR_T1_CHECKSUM_ERROR)
+	if(ret == -ICC_ERRORCODE_T1_CHECKSUM_ERROR)
         {
-            ret = SLOTERROR_XFR_PARITY_ERROR;
+            ret = -ICC_ERRORCODE_XFR_PARITY_ERROR;
         }
-        if(ret != OK)
+        if(ret)
         {
-            if(ret != lastBlockError)
+            if(ret != last_block_error)
             {
-                lastBlockError = ret;
+                last_block_error = ret;
             }
-            if(ret != SLOTERROR_XFR_PARITY_ERROR)
+            if(ret != -ICC_ERRORCODE_XFR_PARITY_ERROR)
             {
-                ret = SLOTERROR_T1_OTHER_ERROR;
+                ret = -ICC_ERRORCODE_T1_OTHER_ERROR;
             }
         }
         else
         {
-            lastBlockError = OK;
+            last_block_error = 0;
         }
 
-        if(ret != OK)
+        if(ret)
         {
-            if((lastBlockError == SLOTERROR_XFR_PARITY_ERROR) || (lastBlockError == SLOTERROR_T1_OTHER_ERROR))
+            if((last_block_error == -ICC_ERRORCODE_XFR_PARITY_ERROR) 
+				|| (last_block_error == -ICC_ERRORCODE_T1_OTHER_ERROR))
             {
-                ret = lastBlockError;
+                ret = last_block_error;
             }
             else
             {
-                lastBlockError = ret;
+                last_block_error = ret;
             }
         }
         else
         {
-            lastBlockError = OK;
+            last_block_error = 0;
             break;
         }
-        if((ret == SLOTERROR_T1_OTHER_ERROR) || (ret == SLOTERROR_XFR_PARITY_ERROR))
+        if((ret == -ICC_ERRORCODE_T1_OTHER_ERROR) || (ret == -ICC_ERRORCODE_XFR_PARITY_ERROR))
         {
-            if(ret == SLOTERROR_XFR_PARITY_ERROR)
+            if(ret == -ICC_ERRORCODE_XFR_PARITY_ERROR)
             {
                 IFDHeader.PCB = 0x81;
             }
@@ -436,210 +451,218 @@ static unsigned char T1_BlockTransceive_ErrorHandle(unsigned char CardIdx, unsig
             {
                 IFDHeader.PCB = 0x82;
             }
-            if(BITisSET(CardParam[CardIdx].T1ExChangeFlag, ICCChainingBit))    // ICC chaining bit
+            if(BITisSET(icc->T1_exchange_flag, ICCChainingBit))    // ICC chaining bit
             {
                 IFDHeader.PCB = 0x80;
             }
             IFDHeader.LEN = 0x00;
-            NumRetry++;
+            num_retry++;
         }
-		PrtMsg("%s: NumRetry = %d\n",__FUNCTION__,NumRetry);
-    }while(NumRetry < 3);
 
-    CardParam[CardIdx].FirstIBlock = 0;
-    if(NumRetry == 3)
+    }while(num_retry < 3);
+
+    icc->first_Iblock = 0;
+    if(num_retry == 3)
     {
-        NumRetry = 0;
-        while(NumRetry < 3)
+        num_retry = 0;
+        while(num_retry < 3)
         {
             IFDHeader.NAD = 0x00;
             IFDHeader.PCB = 0xC0;
             IFDHeader.LEN = 0x00;
-            ret = T1_TPDUExchange_ErrorCheck(CardIdx, CmdBuf, ResBuf);
-            if(ret == OK)
+            ret = icc_t1_tpdu_exchange_error_check(icc, cmd_buf, res_buf);
+            if(!ret)
             {
                 if(ICCHeader.PCB == 0xE0)
                 {
-                    CLEAR_BIT(CardParam[CardIdx].T1ExChangeFlag, IFDBlockNumber);
-					CLEAR_BIT(CardParam[CardIdx].T1ExChangeFlag, ICCBlockNumber);
-                    ret = SLOTERROR_T1_3RETRY_FAIL_RESYNCH_PASS;
+                    CLEAR_BIT(icc->T1_exchange_flag, IFDBlockNumber);
+					CLEAR_BIT(icc->T1_exchange_flag, ICCBlockNumber);
+                    ret = -ICC_ERRORCODE_T1_RETRY_FAIL;
                     break;
                 }
                 else
                 {
-                    NumRetry++;
+                    num_retry++;
                 }
             }
             else
             {
-                NumRetry++;
+                num_retry++;
             }
         }
 
-        if(NumRetry == 3)
+        if(num_retry == 3)
         {
-            ret = SLOTERROR_T1_3RETRY_FAIL;
+            ret = -ICC_ERRORCODE_T1_RETRY_FAIL;
         }
     }
+
+err:
+
+//	TRACE_TO("exit %s", __func__);
+	
     return(ret);
 }
 
-static unsigned char DispatchCardT1(unsigned char CardIdx, unsigned char *CmdBuf, unsigned int CmdLen, unsigned char *ResBuf, unsigned int *ResLen)
+static int icc_t1_dispatch(struct icc_info *icc, u8 *cmd_buf, u32 cmd_len, u8 *res_buf, u32 *res_len)
 {
-    unsigned char NumRetry = 0;
-    unsigned char ret = OK;
-    unsigned char *pSend;
-    unsigned char *pRec;
-    unsigned int SendAPDULen;
-    unsigned char TempIFSC;
-    unsigned char IFDChangeTempBlock;
+    u8 num_retry = 0;
+    int ret = 0;
+    u8 *c_buf;
+    u8 *r_buf;
+    u32 send_apdu_len;
+    u8 temp_ifsc;
+    u8 ifd_change_temp_block;
 
     
-    PrtMsg("%s: CardIdx = %d, CmdLen = %d\n", __FUNCTION__, CardIdx, CmdLen);
+//    TRACE_TO("enter %s\n", __func__);
 
-    if(BITisSET(CardParam[CardIdx].T1ExChangeFlag, FirstAPDUBit))    // first APDU ?
+    if(BITisSET(icc->T1_exchange_flag, FirstAPDUBit))    // first APDU ?
     {
-        CardParam[CardIdx].FirstIBlock = 0;
-        CardParam[CardIdx].T1ExChangeFlag = 0;
-        while(NumRetry < 3)
+        icc->first_Iblock = 0;
+        icc->T1_exchange_flag = 0;
+        while(num_retry < 3)
         {
             IFDHeader.NAD = 0x00;    // the addressing is not used
             IFDHeader.PCB = 0xC1;
             IFDHeader.LEN = 0x01;
             T1_TempBlock[3] = 0xFE;
-            ret = T1_TPDUExchange_ErrorCheck(CardIdx, T1_TempBlock + 3, T1_TempBlock+3);
-            if(ret == OK)
+            ret = icc_t1_tpdu_exchange_error_check(icc, T1_TempBlock + 3, T1_TempBlock+3);
+            if(!ret)
             {
                 if((ICCHeader.PCB != 0xE1) || (T1_TempBlock[3] != 0xFE))
                 {
-                    ret = SLOTERROR_T1_OTHER_ERROR;
+                    ret = -ICC_ERRORCODE_T1_OTHER_ERROR;
                 }
             }
-            if(ret != OK)
+            if(ret)
             {
-                NumRetry++;
+                num_retry++;
             }
             else
             {
                 break;
             }
         }
-        if(NumRetry == 3)
+        if(num_retry == 3)
         {
-            ret = SLOTERROR_T1_3RETRY_FAIL;
+            ret = -ICC_ERRORCODE_T1_RETRY_FAIL;
         }
-        udelay(CardParam[CardIdx].CurETU);
-        CardParam[CardIdx].FirstIBlock = 1;
+        udelay(icc->cur_ETU);
+        icc->first_Iblock = 1;
     }
 
 APDUExchangeBegin:
-    pSend = CmdBuf;
-    pRec = ResBuf;
-    SendAPDULen = CmdLen;
-    memcpy(T1_TempBlock, pSend, 10);
-    TempIFSC = CardParam[CardIdx].IFSC;
-    while(SendAPDULen)
+    c_buf = cmd_buf;
+    r_buf = res_buf;
+    send_apdu_len = cmd_len;
+    memcpy(T1_TempBlock, c_buf, 10);
+    temp_ifsc = icc->IFSC;
+    while(send_apdu_len)
     {
-        CLEAR_BIT(CardParam[CardIdx].T1ExChangeFlag, ICCChainingBit);    // reset ICC chaining bit
-        if(SendAPDULen <= TempIFSC)
+        CLEAR_BIT(icc->T1_exchange_flag, ICCChainingBit);    // reset ICC chaining bit
+        if(send_apdu_len <= temp_ifsc)
         { 
-            PrtMsg("%s: T1ExChangeFlag = %X\n", __FUNCTION__, CardParam[CardIdx].T1ExChangeFlag);
-            CLEAR_BIT(CardParam[CardIdx].T1ExChangeFlag, IFDChainingBit);    // reset IFD chaining bit
+            CLEAR_BIT(icc->T1_exchange_flag, IFDChainingBit);    // reset IFD chaining bit
             IFDHeader.NAD = 0x00;
             IFDHeader.PCB = 0x00;
-            IFDHeader.LEN = (unsigned char)SendAPDULen;
-            ret = T1_BlockTransceive_ErrorHandle(CardIdx, pSend, pRec);
-            CardParam[CardIdx].FirstIBlock = 0;
-            SendAPDULen = 0;
-            if(ret == SLOTERROR_T1_3RETRY_FAIL_RESYNCH_PASS)
+            IFDHeader.LEN = (u8)send_apdu_len;
+            ret = icc_t1_block_transceive_error_handler(icc, c_buf, r_buf);
+            icc->first_Iblock = 0;
+            send_apdu_len = 0;
+            if(ret == -ICC_ERRORCODE_T1_RETRY_FAIL)
             {
-                NumRetry++;
-                if(NumRetry < 3)
+                num_retry++;
+                if(num_retry < 3)
                 {
-                    memcpy(CmdBuf, T1_TempBlock, 10);
-                    pSend = CmdBuf;
-                    pRec = ResBuf;
-                    SendAPDULen = CmdLen;
+                    memcpy(cmd_buf, T1_TempBlock, 10);
+                    c_buf = cmd_buf;
+                    r_buf = res_buf;
+                    send_apdu_len = cmd_len;
                 }
             }
-            else if(ret == OK)
+            else if(!ret)
             {
-                *ResLen = ICCHeader.LEN;
+                *res_len = ICCHeader.LEN;
             }
             else
             {
-                CLEAR_BIT(CardParam[CardIdx].T1ExChangeFlag, ICCChainingBit);    // reset ICC chaining bit;
+                CLEAR_BIT(icc->T1_exchange_flag, ICCChainingBit);    // reset ICC chaining bit;
             }
         }
         else
         {
-            SET_BIT(CardParam[CardIdx].T1ExChangeFlag, IFDChainingBit);    // set IFD chaining bit
+            SET_BIT(icc->T1_exchange_flag, IFDChainingBit);    // set IFD chaining bit
             IFDHeader.NAD = 0x00;
             IFDHeader.PCB = 0x20;
-            IFDHeader.LEN = TempIFSC;
-            IFDChangeTempBlock = pSend[TempIFSC];
-            ret = T1_BlockTransceive_ErrorHandle(CardIdx, pSend, pRec);
-            pSend[TempIFSC] = IFDChangeTempBlock;
-            CardParam[CardIdx].FirstIBlock = 0;
-            CLEAR_BIT(CardParam[CardIdx].T1ExChangeFlag, IFDChainingBit);    // reset IFD chaining bit
-            if(ret == SLOTERROR_T1_3RETRY_FAIL_RESYNCH_PASS)
+            IFDHeader.LEN = temp_ifsc;
+            ifd_change_temp_block = c_buf[temp_ifsc];
+            ret = icc_t1_block_transceive_error_handler(icc, c_buf, r_buf);
+            c_buf[temp_ifsc] = ifd_change_temp_block;
+            icc->first_Iblock = 0;
+            CLEAR_BIT(icc->T1_exchange_flag, IFDChainingBit);    // reset IFD chaining bit
+            if(ret == -ICC_ERRORCODE_T1_RETRY_FAIL)
             {
-                NumRetry++;
-                if(NumRetry < 3)
+                num_retry++;
+                if(num_retry < 3)
                 {
-                    pSend = CmdBuf;
-                    pRec = ResBuf;
-                    memcpy(CmdBuf, T1_TempBlock, 10);
-                    SendAPDULen = CmdLen;
+                    c_buf = cmd_buf;
+                    r_buf = res_buf;
+                    memcpy(cmd_buf, T1_TempBlock, 10);
+                    send_apdu_len = cmd_len;
                 }
             }
-            else if(ret == OK)
+            else if(!ret)
             {
-                SendAPDULen -= TempIFSC;
-                pSend += TempIFSC;
+                send_apdu_len -= temp_ifsc;
+                c_buf += temp_ifsc;
             }
             else
             {
-                SendAPDULen = 0;
-                CLEAR_BIT(CardParam[CardIdx].T1ExChangeFlag, ICCChainingBit);    // reset ICC chaining bit
+                send_apdu_len = 0;
+                CLEAR_BIT(icc->T1_exchange_flag, ICCChainingBit);    // reset ICC chaining bit
             }
         }
     }
-    while(CardParam[CardIdx].T1ExChangeFlag & 0x08)
+    while(icc->T1_exchange_flag & 0x08)
     {
         IFDHeader.NAD = 0x00;
         IFDHeader.PCB = 0x80;
         IFDHeader.LEN = 0x00;
-        pRec += ICCHeader.LEN;
-        ret = T1_BlockTransceive_ErrorHandle(CardIdx, pRec, pRec);
-        if(ret == SLOTERROR_T1_3RETRY_FAIL_RESYNCH_PASS)
+        r_buf += ICCHeader.LEN;
+        ret = icc_t1_block_transceive_error_handler(icc, r_buf, r_buf);
+        if(ret == -ICC_ERRORCODE_T1_RETRY_FAIL)
         {
-            NumRetry++;
-            if(NumRetry < 3)
+            num_retry++;
+            if(num_retry < 3)
             {
-                memcpy(CmdBuf, T1_TempBlock, 10);
+                memcpy(cmd_buf, T1_TempBlock, 10);
                 goto APDUExchangeBegin;
             }
-            CardParam[CardIdx].T1ExChangeFlag &= ~0x08;    // reset ICC chaining bit
+            icc->T1_exchange_flag &= ~0x08;    // reset ICC chaining bit
         }
-        else if(ret == OK)
+        else if(!ret)
         {
-            *ResLen += ICCHeader.LEN;
+            *res_len += ICCHeader.LEN;
         }
         else
         {
-            CardParam[CardIdx].T1ExChangeFlag &= ~0x08;    // reset ICC chaining bit
+            icc->T1_exchange_flag &= ~0x08;    // reset ICC chaining bit
         }
     }
+
+//	TRACE_TO("exit %s", __func__);
+	
     return(ret);
 }
 
-unsigned char ParseCardT1(unsigned char CardIdx, unsigned char *CmdBuf, unsigned int CmdLen, unsigned char *ResBuf, unsigned int *ResLen)
+static int icc_t1_parse(struct icc_info *icc, u8 *cmd_buf, u32 cmd_len, u8 *res_buf, u32 *res_len)
 {
-    unsigned char ret = OK;
+    int ret = 0;
 
-    PrtMsg("%s: CardIdx = %d, CmdLen = %d\n", __FUNCTION__, CardIdx, CmdLen);
-    ret = DispatchCardT1(CardIdx, CmdBuf, CmdLen, ResBuf, ResLen);
+
+    ret = icc_t1_dispatch(icc, cmd_buf, cmd_len, res_buf, res_len);
+	
     return(ret);
 }
 

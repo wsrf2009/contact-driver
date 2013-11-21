@@ -1,409 +1,386 @@
-/*
-* Name: ATR source file
-* Date: 2012/10/18
-* Author: Alex Wang
-* Version: 1.0
-*/
 
-#include <linux/delay.h>
 
-#include "atr.h"
-#include "debug.h"
-#include "common.h"
-#include "uart.h"
-#include "param.h"
-#include "at83c26.h"
-#include "icc.h"
-#include "timer.h"
 
-int Card_ColdReset(unsigned char CardIdx, unsigned char CardVoltage)
+
+int icc_cold_reset(struct icc_info *icc, u8 card_vcc)
 {
-    PrtMsg("welcome to the function: %s, CardIdx = %X, CardVoltage = %X\n", __FUNCTION__, CardIdx, CardVoltage);
+	int	ret = 0;
 
-    if(AT83C26_CVCCx(CardIdx, CardVoltage))
+	
+//    TRACE_TO("enter %s\n", __func__);
+
+    if(at83c26_CVCCx(icc->slot, card_vcc))
     {
-        return(-1);
+        ret = -ICC_ERRORCODE_HW_ERROR;
+		goto	err;
     }
-    Put_Uart_OutLine_Normal();
-    if(AT83C26_CCLKx(CardIdx, 1, 0))
+	
+    put_uart_outline_normal();
+	
+    if(at83c26_CCLKx(icc->slot, 1, 0))
     {
-        return(-1);
+        ret = -ICC_ERRORCODE_HW_ERROR;
+		goto	err;
     }
-    udelay(400 / FRE_CNTACARD);
-    CLearFIFO();
-    if(AT83C26_CRSTx(CardIdx, 1)) 
+    udelay(400 / (icc->common->freq / 1000000));
+    uart_clear_fifo();
+    if(at83c26_CRSTx(icc->slot, 1)) 
     {
-        return(-1);
+        ret = -ICC_ERRORCODE_HW_ERROR;
+		goto	err;
     }
-    Set_WaiTingTime(40000 / FRE_CNTACARD);
+	
+    set_waiting_timer(icc, 40000 / (icc->common->freq / 1000000));
     // ignore the data accroding to 6.2.2 in ISO/IEC 7816-3
-    
-    return(0);
+
+err:
+//	TRACE_TO("exit %s\n", __func__);
+//	while(1);
+    return	ret;
 }
 
-void Card_WarmReset(unsigned char CardIdx)
+void icc_warm_reset(struct icc_info *icc)
 {
-    PrtMsg("welcome to the function: %s, CardIdx = %X\n", __FUNCTION__, CardIdx);
-    AT83C26_CRSTx(CardIdx, 0);
-    udelay(400 / FRE_CNTACARD);
-    CLearFIFO();
-    AT83C26_CRSTx(CardIdx, 1);
-    Set_WaiTingTime(40000 / FRE_CNTACARD);
+//    TRACE_TO("enter %s\n", __func__);
+	
+    at83c26_CRSTx(icc->slot, 0);
+    udelay(400 / (icc->common->freq / 1000000));
+    uart_clear_fifo();
+    at83c26_CRSTx(icc->slot, 1);
+    set_waiting_timer(icc, 40000 / (icc->common->freq / 1000000));
     // ignore the data accroding to 6.2.3 in ISO/IEC 7816-3
+
+//	TRACE_TO("exit %s\n", __func__);
 }
 
-int Card_GetATR(unsigned char CardIdx, unsigned char *AtrBuf, unsigned int *AtrLen)
+int icc_get_atr(struct icc_info *icc, u8 *atr_buf, u32 *atr_len)
 {
-    unsigned char RecLen;
-    unsigned char AtrBufIdx;
-    unsigned char HisBytes;
-    unsigned char CheckCharacter=0;
-    bool LastTDi = false;
+    u8 rec_len;
+    u8 atr_buf_idx;
+    u8 his_bytes;
+    u8 check_character=0;
+    bool last_tdi = false;
+	int ret;
 
     
-    PrtMsg("welcome to the function: %s\n", __FUNCTION__);
+//    TRACE_TO("enter %s\n", __func__);
+	
     // receive TS
-    AtrBufIdx = 0;
-    if(SC_RecMoreBytes(CardIdx, (AtrBuf + AtrBufIdx), 1) == SC_PARITY_ERROR)    // parity error
+    atr_buf_idx = 0;
+    if(ifd_receive_bytes(icc, (atr_buf + atr_buf_idx), 1) == -ICC_ERRORCODE_XFR_PARITY_ERROR)    // parity error
     {
-        if(AtrBuf[0] == 0x03)    // inverse convention
+        if(atr_buf[0] == 0x03)    // inverse convention
         {
-            AtrBuf[0] = 0x3F;
-            CardParam[CardIdx].Direct = INVERSE_CONVENTION;
+            atr_buf[0] = 0x3F;
+            icc->direct = INVERSE_CONVENTION;
         }
         else
         {
-            PrtMsg("%s:Fail to get ATR with TS error\n",__FUNCTION__);
-            return(-1);
+            ERROR_TO("TS error[%02X] when get atr\n", atr_buf[0]);
+            ret = -ICC_ERRORCODE_BAD_ATR_TS;
+			goto	err;
         }
     }
-    else if(AtrBuf[0] == 0x3B)
+    else if(atr_buf[0] == 0x3B)
     {
-        CardParam[CardIdx].Direct = DIRECT_CONVENTION;
+        icc->direct = DIRECT_CONVENTION;
     }
-    else if(AtrBuf[0] == 0x03)
+    else if(atr_buf[0] == 0x03)
     {
-        AtrBuf[0] = 0x3F;
-        CardParam[CardIdx].Direct = INVERSE_CONVENTION;
+        atr_buf[0] = 0x3F;
+        icc->direct = INVERSE_CONVENTION;
     }
     else
     {
-        PrtMsg("%s:Fail to get ATR with Bad ATR, AtrBuf[0] = %X\n", __FUNCTION__, AtrBuf[0]);
-        return(-1);
+		ERROR_TO("TS error[%02X] when get atr\n", atr_buf[0]);
+        ret = -ICC_ERRORCODE_BAD_ATR_TS;
+		goto	err;
     }
-    AtrBufIdx++;
+    atr_buf_idx++;
 
     // receive T0
-    if(SC_RecMoreBytes(CardIdx, AtrBuf + AtrBufIdx, 1))
-    {
-        return(-1);
-    }
-    AtrBufIdx++;
-    RecLen = 0;
-    if(AtrBuf[1] & 0x10)    RecLen++;
-    if(AtrBuf[1] & 0x20)    RecLen++;
-    if(AtrBuf[1] & 0x40)    RecLen++;
-    if(AtrBuf[1] & 0x80)    RecLen++;
-    HisBytes = AtrBuf[1] & 0x0F;
+    ret = ifd_receive_bytes(icc, atr_buf+atr_buf_idx, 1);
+    if(ret)		
+		goto	err;
+
+    atr_buf_idx++;
+    rec_len = 0;
+    if(atr_buf[1] & 0x10)    rec_len++;
+    if(atr_buf[1] & 0x20)    rec_len++;
+    if(atr_buf[1] & 0x40)    rec_len++;
+    if(atr_buf[1] & 0x80)    rec_len++;
+    his_bytes = atr_buf[1] & 0x0F;
 
     // receive TA1,TB1,TC1,TD1
-    if(RecLen)
+    if(rec_len)
     {
-        if(SC_RecMoreBytes(CardIdx, AtrBuf + AtrBufIdx, RecLen))
-  {
-	    return(-1);
-	}
+    	ret = ifd_receive_bytes(icc, atr_buf+atr_buf_idx, rec_len);
+        if(ret)
+			goto	err;
     }
-    AtrBufIdx += RecLen;
+    atr_buf_idx += rec_len;
 
-    if(AtrBuf[1] & 0x80)
+    if(atr_buf[1] & 0x80)
     {
         do
         {
-            if(AtrBuf[AtrBufIdx -1] & 0x0F)   
-	    {
-	        CheckCharacter = 1;
-	    }
+            if(atr_buf[atr_buf_idx -1] & 0x0F)   check_character = 1;
 
-            RecLen = 0;
-            if(AtrBuf[AtrBufIdx -1] & 0x10)
-	    {
-	        RecLen++;
-	    }
-            if(AtrBuf[AtrBufIdx -1] & 0x20)
-	    {
-	        RecLen++;
-	    }
-            if(AtrBuf[AtrBufIdx -1] & 0x40)
-	    {
-	        RecLen++;
-	    }
-            if(AtrBuf[AtrBufIdx -1] & 0x80)
-	    {
-	        RecLen++;
-	    }
-            else 
-	    {
-	        LastTDi = true;
-	    }
-            
-            if(SC_RecMoreBytes(CardIdx, AtrBuf + AtrBufIdx, RecLen)) 
-	    {
-	        return(-1);
-	    }
-            AtrBufIdx += RecLen;
+            rec_len = 0;
+            if(atr_buf[atr_buf_idx -1] & 0x10)	rec_len++;
+            if(atr_buf[atr_buf_idx -1] & 0x20)	rec_len++;
+            if(atr_buf[atr_buf_idx -1] & 0x40)	rec_len++;
+            if(atr_buf[atr_buf_idx -1] & 0x80)	rec_len++;
+            else	last_tdi = true;
 
-            if((RecLen == 0) || (LastTDi == true))
-	    {
-	        break;
-	    }
-        }while(AtrBufIdx <= MAXATRLEN);
+            ret = ifd_receive_bytes(icc, atr_buf+atr_buf_idx, rec_len);
+            if(ret) 
+				goto	err;
+			
+            atr_buf_idx += rec_len;
+
+            if((rec_len == 0) || (last_tdi == true))
+				break;
+			
+        }while(atr_buf_idx <= MAX_ATR_LEN);
     }
 
-    if(SC_RecMoreBytes(CardIdx, AtrBuf + AtrBufIdx, HisBytes + CheckCharacter))
+	ret = ifd_receive_bytes(icc, atr_buf+atr_buf_idx, his_bytes+check_character);
+    if(ret)
+		goto err;
+	
+    *atr_len = atr_buf_idx + his_bytes + check_character;
+    if(*atr_len > MAX_ATR_LEN)
     {
-        return(-1);
-    }
-    *AtrLen = AtrBufIdx + HisBytes + CheckCharacter;
-    if(*AtrLen > MAXATRLEN)
-    {
-        PrtMsg("%s:Fail to get ATR with Length error\n",__FUNCTION__);
-        return(-1);
+        ERROR_TO("fail to get ATR with Length error\n");
+        ret = -ICC_ERRORCODE_BAD_LENGTGH;
     }
 
-    if(CheckCharacter)
+    if(check_character)
     {
         unsigned char CheckValue = 0;
 
-        for(AtrBufIdx = 1; AtrBufIdx < *AtrLen; AtrBufIdx++)
-	{
-	    CheckValue ^= AtrBuf[AtrBufIdx];
-	}
+        for(atr_buf_idx = 1; atr_buf_idx < *atr_len; atr_buf_idx++)
+		{
+	    	CheckValue ^= atr_buf[atr_buf_idx];
+		}
+		
         if(CheckValue)
         {
-            PrtMsg("%s:Fail to get ATR with TCK error\n",__FUNCTION__);
-            return(-1);
+            ERROR_TO("fail to get ATR with TCK error\n");
+            ret = -ICC_ERRORCODE_BAD_ATR_TCK;
+			goto	err;
         }
     }
     
-    return(0);
+    ret = 0;
+
+err:
+//	TRACE_TO("exit %s\n", __func__);
+	return	ret;
 }
 
-static unsigned char GetATRBytePosition(unsigned char *AtrBuf, unsigned int *AtrLen, unsigned char ATRByte, unsigned char AtrByteNmbr)
+static u8 get_atr_byte_position(u8 *atr_buf, u32 *atr_len, u8 atr_byte, u8 atr_byte_number)
 {
-    unsigned char TempByteNmbr = 1;
-    unsigned char TempByte;
-    unsigned char AtrLenWithoutHis;
-    unsigned char AtrBufIdx = 1;
+    u8 temp_byte_number = 1;
+    u8 temp_byte;
+    u8 atr_len_without_his;
+    u8 atr_buf_idx = 1;
 
-    
-    PrtMsg("welcome to the function: %s\n", __FUNCTION__);
-    TempByte = AtrBuf[AtrBufIdx];
-    AtrLenWithoutHis = *AtrLen - (AtrBuf[1] & 0x0F); // Get the ATR length without the historical characters
-    while(AtrBufIdx < AtrLenWithoutHis)              // find "ATRByte" in "AtrBuf"
+	
+    temp_byte = atr_buf[atr_buf_idx];
+    atr_len_without_his = *atr_len - (atr_buf[1] & 0x0F); // Get the ATR length without the historical characters
+    while(atr_buf_idx < atr_len_without_his)              // find "atr_byte" in "atr_buf"
     {
-        if(TempByte & 0x10)                          // TAi present
+        if(temp_byte & 0x10)                          // TAi present
         {
-            if(ATRByte != CHARACTER_TA ||  AtrByteNmbr != TempByteNmbr) 
-	    {
-	        AtrBufIdx++;
-	    }
+            if(atr_byte != CHARACTER_TA ||  atr_byte_number != temp_byte_number) 
+	    	{
+	        	atr_buf_idx++;
+	    	}
             else
-	    {
-	        return(AtrBufIdx+1);
-	    }
+	    	{
+	        	return(atr_buf_idx+1);
+	    	}
         }
-        if(TempByte & 0x20)                          // TBi present
+        if(temp_byte & 0x20)                          // TBi present
         {
-            if(ATRByte != CHARACTER_TB ||  AtrByteNmbr != TempByteNmbr) 
-	    {
-	        AtrBufIdx++;
-	    }
+            if(atr_byte != CHARACTER_TB ||  atr_byte_number != temp_byte_number) 
+	    	{
+	        	atr_buf_idx++;
+	    	}
             else
-	    {
-	        return(AtrBufIdx+1);
-	    }
+	    	{
+	        	return(atr_buf_idx+1);
+	    	}
         }
-        if(TempByte & 0x40)                          // TCi present
+        if(temp_byte & 0x40)                          // TCi present
         {
-            if(ATRByte != CHARACTER_TC ||  AtrByteNmbr != TempByteNmbr) 
-	    {
-	        AtrBufIdx++;
-	    }
+            if(atr_byte != CHARACTER_TC ||  atr_byte_number != temp_byte_number) 
+	    	{
+	        	atr_buf_idx++;
+	    	}
             else
-	    {
-	        return(AtrBufIdx+1);
-	    }
+	    	{
+	        	return(atr_buf_idx+1);
+	    	}
         } 
-        if(TempByte & 0x80)                          // TDi present
+        if(temp_byte & 0x80)                          // TDi present
         {
-            if(ATRByte != CHARACTER_TD ||  AtrByteNmbr != TempByteNmbr)
+            if(atr_byte != CHARACTER_TD ||  atr_byte_number != temp_byte_number)
             {
-                AtrBufIdx++;
-                TempByteNmbr++;
-                TempByte = AtrBuf[AtrBufIdx];
+                atr_buf_idx++;
+                temp_byte_number++;
+                temp_byte = atr_buf[atr_buf_idx];
             }
             else 
-	    {
-	        return(AtrBufIdx+1);
-	    }
+	    	{
+	        	return(atr_buf_idx+1);
+	    	}
         }
         else 
-	{
-	    return(0);     
-	}
+		{
+	    	return(0);     
+		}
     }
     
     return(0);
 }
 
-void Card_AnalyzeATR(unsigned char CardIdx, unsigned char *AtrBuf, unsigned int *AtrLen)
+void icc_analyze_atr(struct icc_info *icc, u8 *atr_buf, u32 *atr_len)
 {
-    unsigned char TempPosition;
-    unsigned char TempByte;
-    unsigned char TempSaveTD;
-    unsigned char TempNewPosition;
-    unsigned char TD15Position = 0;
-    unsigned char TDSecondT1Position = 0;
-    unsigned char TempNmbr = 2;
-    unsigned char TempTA2 = 0;
+    u8 temp_position;
+    u8 temp_byte;
+    u8 temp_save_td;
+    u8 temp_new_position;
+    u8 td15_position = 0;
+    u8 temp_number = 2;
+    u8 temp_ta2 = 0;
 
     
-    PrtMsg("welcome to the function: %s, CardIdx = %X\n", __FUNCTION__, CardIdx);
-    TempPosition = GetATRBytePosition(AtrBuf, AtrLen, CHARACTER_TD, 1);
-    if(TempPosition != 0)                                   // TD1 is present?
+//    TRACE_TO("enter %s\n", __func__);
+	
+    temp_position = get_atr_byte_position(atr_buf, atr_len, CHARACTER_TD, 1);
+    if(temp_position != 0)                                   // TD1 is present?
     {
-        TempByte = AtrBuf[TempPosition] & 0x0F;
-        CardParam[CardIdx].T = TempByte;
-        TempSaveTD = TempByte;
+        temp_byte = atr_buf[temp_position] & 0x0F;
+        icc->T = temp_byte;
+        temp_save_td = temp_byte;
 
         while(1)
         {
-            TempNewPosition = GetATRBytePosition(AtrBuf, AtrLen, CHARACTER_TD, TempNmbr);
-            if(TempNewPosition == 0)
-	    {
-	      break;
-	    }
+            temp_new_position = get_atr_byte_position(atr_buf, atr_len, CHARACTER_TD, temp_number);
+            if(temp_new_position == 0)	break;
 
-            TempByte = AtrBuf[TempNewPosition];      // TDi 
-            if((TempByte & 0x0F) >= (TempSaveTD & 0x0F))    // Normal case the new T value should be higher than the previous one
+            temp_byte = atr_buf[temp_new_position];      // TDi 
+            if((temp_byte & 0x0F) >= (temp_save_td & 0x0F))    // Normal case the new T value should be higher than the previous one
             {
-                TempNmbr++;
-                TempSaveTD = TempByte;
+                temp_number++;
+                temp_save_td = temp_byte;
             }
             else
             {
-                PrtMsg("%s:Fail to analyze ATR with TD error\n", __FUNCTION__);
+                ERROR_TO("fail to analyze ATR with TD error\n");
                 break;
             }
             
             // T=15 is present
-            if((TempByte & 0x0F) == 0x0F) 
-	    {
-	        TD15Position = TempNewPosition;
-	    }
+            if((temp_byte & 0x0F) == 0x0F)	td15_position = temp_new_position;
+
             // T=1 is present, but TDi >= TD2
-            if((TempByte & 0x0F) == 0x01)
-	    {
-	        TDSecondT1Position = TempNewPosition;
-	    }
+//            if((temp_byte & 0x0F) == 0x01)	TDSecondT1Position = temp_new_position;
+
         }
     }
     else 
     {
-        CardParam[CardIdx].T = T0_TYPE;               // if TD1 is absent, then the only offer is T=0 
+        icc->T = T0_TYPE;               // if TD1 is absent, then the only offer is T=0 
     }
 
     // analyze TA2
-    TempPosition = GetATRBytePosition(AtrBuf, AtrLen, CHARACTER_TA, 2);    // Get TA2
-    if(TempPosition)
+    temp_position = get_atr_byte_position(atr_buf, atr_len, CHARACTER_TA, 2);    // Get TA2
+    if(temp_position)
     {   // TA2 is present
-        TempTA2  = AtrBuf[TempPosition];
-        CardParam[CardIdx].Mode = SPECIFIC_MODE;    // if TA2 is present in ATR, card in specific mode, refer to 6.3.1 in ISO/IEC 7816-3
-        if((TempTA2 & 0x0F) < 2)
+        temp_ta2  = atr_buf[temp_position];
+        icc->mode = SPECIFIC_MODE;    // if TA2 is present in ATR, card in specific mode, refer to 6.3.1 in ISO/IEC 7816-3
+        if((temp_ta2 & 0x0F) < 2)
         {
-            CardParam[CardIdx].T = TempTA2 & 0x0F;
+            icc->T = temp_ta2 & 0x0F;
         }
     }
 
     // analyze TA1
-    TempPosition = GetATRBytePosition(AtrBuf, AtrLen, CHARACTER_TA, 1);    // Get TA1
-    if(TempPosition)
+    temp_position = get_atr_byte_position(atr_buf, atr_len, CHARACTER_TA, 1);    // Get TA1
+    if(temp_position)
     {
-        CardParam[CardIdx].FiDi = AtrBuf[TempPosition];
-        if(CardParam[CardIdx].Mode == SPECIFIC_MODE)
+        icc->FiDi = atr_buf[temp_position];
+        if(icc->mode == SPECIFIC_MODE)
         {
-            if(TempTA2 & 0x10)
+            if(temp_ta2 & 0x10)
             {
-                CardParam[CardIdx].FiDi = DEFAULT_FIDI;
+                icc->FiDi = DEFAULT_FIDI;
             }
         }
     }
 
     // analyze TC1, extra guard time
-    TempPosition = GetATRBytePosition(AtrBuf, AtrLen, CHARACTER_TC, 1);    // Get TC1
-    if(TempPosition)
+    temp_position = get_atr_byte_position(atr_buf, atr_len, CHARACTER_TC, 1);    // Get TC1
+    if(temp_position)
     {
-        CardParam[CardIdx].N = AtrBuf[TempPosition];
+        icc->N = atr_buf[temp_position];
     }
 
     // analyze TC2, waiting time
-    TempPosition = GetATRBytePosition(AtrBuf, AtrLen, CHARACTER_TC, 2);    // Get TC2
-    if(TempPosition && (AtrBuf[TempPosition] != 0))
+    temp_position = get_atr_byte_position(atr_buf, atr_len, CHARACTER_TC, 2);    // Get TC2
+    if(temp_position && (atr_buf[temp_position] != 0))
     {   // TC2 present and do not is 0x00, refer to 10.2 in ISO/IEC 7816-3
-        CardParam[CardIdx].WI = AtrBuf[TempPosition];
+        icc->WI = atr_buf[temp_position];
     }  
 
-    TempPosition = GetATRBytePosition(AtrBuf, AtrLen, CHARACTER_TD, 2);    // Get TD2 
-    TempNewPosition = TempPosition;
-    if(TempPosition)
+    temp_position = get_atr_byte_position(atr_buf, atr_len, CHARACTER_TD, 2);    // Get TD2 
+    temp_new_position = temp_position;
+    if(temp_position)
     {
-        if(AtrBuf[TempNewPosition] & 0x10)                 // TA3 is present
+        if(atr_buf[temp_new_position] & 0x10)                 // TA3 is present
         {
-            CardParam[CardIdx].IFSC = AtrBuf[++TempPosition];    // refer to 11.4.2 in ISO/IEC 7816-3
+            icc->IFSC = atr_buf[++temp_position];    // refer to 11.4.2 in ISO/IEC 7816-3
         }
-        if(AtrBuf[TempNewPosition] & 0x20)                 // TB3 is present
+        if(atr_buf[temp_new_position] & 0x20)                 // TB3 is present
         {
             // refer to 11.4.3 in ISO/IEC 7816-3
-            TempByte = (AtrBuf[++TempPosition] & 0xF0) >> 4;
-            if(TempByte < 0x0A)         // values A ~ F are reserved for future use
+            temp_byte = (atr_buf[++temp_position] & 0xF0) >> 4;
+            if(temp_byte < 0x0A)         // values A ~ F are reserved for future use
             {
-                CardParam[CardIdx].BWI = TempByte;  
+                icc->BWI = temp_byte;  
             }
-            CardParam[CardIdx].CWI = AtrBuf[TempPosition] & 0x0F;
+            icc->CWI = atr_buf[temp_position] & 0x0F;
         }
-        if(AtrBuf[TempNewPosition] & 0x40)                 // TC3 is present
+        if(atr_buf[temp_new_position] & 0x40)                 // TC3 is present
         {
-            CardParam[CardIdx].Check = AtrBuf[++TempPosition] & 0x01;    // refer to 11.4.4 in ISO/IEC 7816-3
+            icc->check = atr_buf[++temp_position] & 0x01;    // refer to 11.4.4 in ISO/IEC 7816-3
         }
     }
 
     // T = 15 parse
-    if(TD15Position != 0)
+    if(td15_position != 0)
     {
-        if((AtrBuf[TD15Position] & 0x10) == 0x10)    // the first TA for T=15
+        if((atr_buf[td15_position] & 0x10) == 0x10)    // the first TA for T=15
         {
-            CardParam[CardIdx].ClkStop = (AtrBuf[TD15Position+1] & 0xC0) >> 6;   // Clock stop indicator (X)
-            CardParam[CardIdx].Class   = AtrBuf[TD15Position+1] & 0x3F;    // class indicator (Y)
+            icc->clock_stop = (atr_buf[td15_position+1] & 0xC0) >> 6;   // Clock stop indicator (X)
+            icc->class   = atr_buf[td15_position+1] & 0x3F;    // class indicator (Y)
         }
 
-        if((AtrBuf[TD15Position] & 0x20) == 0x20)    // the first TB for T=15
+        if((atr_buf[td15_position] & 0x20) == 0x20)    // the first TB for T=15
         {
-            TempByte = AtrBuf[TD15Position+2];
-            if(TempByte == 0)
-	    {
-                CardParam[CardIdx].C6Use = C6_UNUSED;
-	    }
-            else if((TempByte & 0x80) == 0x00)
-	    {
-	        CardParam[CardIdx].C6Use = C6_STANDARD_USE;
-	    }
-            else
-	    {
-	        CardParam[CardIdx].C6Use = C6_PROPRIETARY_USE;
-	    }
+            temp_byte = atr_buf[td15_position+2];
+            if(temp_byte == 0)	icc->c6_use = C6_UNUSED;
+            else if((temp_byte & 0x80) == 0x00)	icc->c6_use = C6_STANDARD_USE;
+            else	icc->c6_use = C6_PROPRIETARY_USE;
         }
     }
+
+//	TRACE_TO("exit %s\n", __func__);
+	
 }
 
 
